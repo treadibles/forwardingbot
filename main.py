@@ -51,17 +51,21 @@ app.add_handler(CommandHandler("register", register))
 # --- Handle media album by downloading before sending ---
 @client.on(events.Album(chats=SOURCE_CHANNEL))
 async def handle_album(event):
+    print(f"[DEBUG] New post detected in source channel {SOURCE_CHANNEL}.")
     media_messages = event.messages
+    print(f"[DEBUG] Detected {len(media_messages)} media items in album.")
+
     for cid in registered_channels:
         try:
-            print(f"[INFO] Downloading album from {SOURCE_CHANNEL}...")
             downloaded = []
-            for m in media_messages:
+            for index, m in enumerate(media_messages):
+                print(f"[DEBUG] Downloading item {index + 1}/{len(media_messages)}...")
                 file_path = await m.download_media()
+                print(f"[DEBUG] Downloaded item {index + 1}: {file_path}")
                 downloaded.append((file_path, m.message or ""))
 
             if downloaded:
-                print(f"[INFO] All files downloaded. Uploading to {cid}...")
+                print(f"[INFO] All files downloaded. Uploading to channel {cid}...")
                 await client.send_file(
                     cid,
                     files=[item[0] for item in downloaded],
@@ -70,10 +74,10 @@ async def handle_album(event):
                 )
                 print(f"[SUCCESS] Album sent to {cid} ✅")
 
-                # Optional cleanup
                 for f, _ in downloaded:
                     try:
                         os.remove(f)
+                        print(f"[CLEANUP] Removed file: {f}")
                     except Exception as cleanup_err:
                         print(f"[WARN] Failed to delete {f}: {cleanup_err}")
 
