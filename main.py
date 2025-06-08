@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import nest_asyncio
+import telethon
 from telethon import TelegramClient, events
 from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
@@ -70,7 +71,7 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app.add_handler(CommandHandler("register", register))
 
-# --- Debug Command ---
+# --- /start Debug Command ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Bot is active and ready.")
 
@@ -135,7 +136,7 @@ async def main():
 
     asyncio.create_task(run_bot_commands())
 
-    print("✅ Telethon version:", client.version)
+    print("✅ Telethon version:", telethon.__version__)
     print("🚀 Telethon client listening...")
     try:
         await asyncio.Future()  # Keeps it alive
