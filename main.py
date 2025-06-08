@@ -1,13 +1,16 @@
 import os
 import asyncio
-from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, InputMediaPhoto, InputMediaDocument
 from telethon.errors import SessionPasswordNeededError
 import logging
 
-# Load environment variables
-load_dotenv()
+# Try to load dotenv if available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("python-dotenv not installed. Reading from system environment variables.")
 
 # Configure logging
 logging.basicConfig(
@@ -27,9 +30,14 @@ PHONE_NUMBER = os.getenv('PHONE_NUMBER')
 target_channels = set()
 target_channels_file = 'target_channels.txt'
 
+# Session directory (for Docker volumes)
+session_dir = os.getenv('TELETHON_SESSION_DIR', '.')
+user_session_path = os.path.join(session_dir, 'user_session')
+bot_session_path = os.path.join(session_dir, 'bot_session')
+
 # Initialize clients
-user_client = TelegramClient('user_session', API_ID, API_HASH)
-bot_client = TelegramClient('bot_session', API_ID, API_HASH)
+user_client = TelegramClient(user_session_path, API_ID, API_HASH)
+bot_client = TelegramClient(bot_session_path, API_ID, API_HASH)
 
 async def load_target_channels():
     """Load target channels from file"""
