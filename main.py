@@ -1,8 +1,3 @@
-# --- Telegram Forward Bot with Native Forwarding & Caption Editing ---
-
-import subprocess
-subprocess.run(["pip", "install", "--upgrade", "--force-reinstall", "telethon"])
-
 import os
 import re
 import json
@@ -16,7 +11,6 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-PHONE_NUMBER = os.getenv("PHONE_NUMBER")
 SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
 
 try:
@@ -24,7 +18,8 @@ try:
 except:
     pass
 
-client = TelegramClient("bot_session", API_ID, API_HASH)
+# --- Create Clients ---
+client = TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 bot = Bot(token=BOT_TOKEN)
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -132,8 +127,6 @@ async def handle_single(event):
 
 # --- Main Event Loop ---
 async def main():
-    await client.start(phone=PHONE_NUMBER)
-
     async def run_bot_commands():
         print("✅ Command handler (python-telegram-bot) running.")
         await app.initialize()
@@ -142,10 +135,10 @@ async def main():
 
     asyncio.create_task(run_bot_commands())
 
+    print("✅ Telethon version:", client.version)
     print("🚀 Telethon client listening...")
-
     try:
-        await asyncio.Future()  # Wait forever until interrupted
+        await asyncio.Future()  # Keeps it alive
     except (KeyboardInterrupt, SystemExit):
         print("🛑 Shutdown triggered")
     finally:
