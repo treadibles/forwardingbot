@@ -7,16 +7,16 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 SOURCE_CHANNEL = os.getenv("SOURCE_CHANNEL")
+PHONE_NUMBER = os.getenv("PHONE_NUMBER")
 
 try:
     SOURCE_CHANNEL = int(SOURCE_CHANNEL)
 except:
     pass
 
-client = TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-app = ApplicationBuilder().token(BOT_TOKEN).build()
+# User session only — no bot token usage
+client = TelegramClient("user_session", API_ID, API_HASH)
 
 CHANNELS_FILE = "registered_channels.json"
 
@@ -32,21 +32,6 @@ def save_channels():
         json.dump(list(registered_channels), f)
 
 registered_channels = load_channels()
-
-# --- /register command ---
-async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /register <channel_id>")
-        return
-    try:
-        cid = int(context.args[0])
-        registered_channels.add(cid)
-        save_channels()
-        await update.message.reply_text(f"✅ Registered channel: {cid}")
-    except ValueError:
-        await update.message.reply_text("❌ Invalid channel ID format")
-
-app.add_handler(CommandHandler("register", register))
 
 # --- Handle media albums ---
 @client.on(events.Album(chats=SOURCE_CHANNEL))
@@ -115,12 +100,8 @@ async def debug_all(event):
 
 # --- Main loop ---
 async def main():
-    async def run_bot_commands():
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling()
+    await client.start(phone=PHONE_NUMBER)
 
-    asyncio.create_task(run_bot_commands())
     print("🚀 Bot is running. Albums and all messages will be copied and reposted.")
     print(f"🔍 Listening to source channel: {SOURCE_CHANNEL}")
     await asyncio.Future()
