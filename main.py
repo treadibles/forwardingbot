@@ -1,11 +1,9 @@
 import os
-import re
-import json
 import asyncio
-import nest_asyncio
-import telethon
+import json
 from telethon import TelegramClient, events
-from telegram import Bot, Update
+from telethon.sessions import StringSession
+from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 # --- Load from Environment ---
@@ -19,12 +17,11 @@ try:
 except:
     pass
 
-# --- Create Clients ---
+# --- Setup Clients ---
 client = TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
-bot = Bot(token=BOT_TOKEN)
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# --- Persistent Channel Storage ---
+# --- Persistent Channel Registry ---
 CHANNELS_FILE = "registered_channels.json"
 
 def load_channels():
@@ -38,23 +35,6 @@ def save_channels():
         json.dump(list(registered_channels), f)
 
 registered_channels = load_channels()
-
-# --- Price Adjustment Logic ---
-def adjust_prices(text):
-    def replacement(match):
-        before_for = match.group(1)
-        after_for = match.group(2)
-        try:
-            before = int(before_for)
-            if before < 50:
-                before += 3
-            else:
-                before += 200
-            return f"{before} for {after_for}"
-        except:
-            return match.group(0)
-
-    return re.sub(r"(\d{2,5})\s+for\s+(\d+)", replacement, text)
 
 # --- /register Command ---
 async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -71,81 +51,32 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app.add_handler(CommandHandler("register", register))
 
-# --- /start Debug Command ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot is active and ready.")
-
-app.add_handler(CommandHandler("start", start))
-
-# --- Handle Albums ---
+# --- Album Forwarding Handler ---
 @client.on(events.Album(chats=SOURCE_CHANNEL))
 async def handle_album(event):
-    try:
-        message_ids = [m.id for m in event.messages]
-        print(f"[FORWARDING GROUP] Messages: {message_ids}")
-
-        for cid in registered_channels:
-            fwd = await client.forward_messages(
-                entity=cid,
-                messages=message_ids,
-                from_peer=SOURCE_CHANNEL,
-                hide_sender=True
-            )
-            if not isinstance(fwd, list):
-                fwd = [fwd]
-
-            editable = next((m for m in fwd if m.out and m.message), None)
-            if editable:
-                new_caption = adjust_prices(editable.message)
-                await client.edit_message(cid, editable.id, new_caption)
-            else:
-                print("[ERROR] No editable message in forwarded group")
-
-    except Exception as e:
-        print(f"[ERROR] Native Forward or Edit Failed: {e}")
-
-# --- Handle Single Media Posts ---
-@client.on(events.NewMessage(chats=SOURCE_CHANNEL))
-async def handle_single(event):
-    if event.grouped_id:
-        return  # Skip albums
-
-    print(f"[FORWARDING SINGLE] Message: {event.id}")
-
+    message_ids = [m.id for m in event.messages]
     for cid in registered_channels:
         try:
             fwd = await client.forward_messages(
                 entity=cid,
-                messages=event.id,
+                messages=message_ids,
                 from_peer=SOURCE_CHANNEL,
-                hide_sender=True
+                hide_sender=True  # Requires Telethon >=1.41.0 from GitHub
             )
-            if fwd.out and fwd.message:
-                new_caption = adjust_prices(fwd.message)
-                await client.edit_message(cid, fwd.id, new_caption)
+            print(f"[FORWARDED] Album to {cid} as native media group.")
         except Exception as e:
-            print(f"[ERROR] Native Forward/Edit Single Failed: {e}")
+            print(f"[ERROR] Forwarding failed for {cid}: {e}")
 
 # --- Main Event Loop ---
 async def main():
-    async def run_bot_commands():
-        print("✅ Command handler (python-telegram-bot) running.")
+    async def run_commands():
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
 
-    asyncio.create_task(run_bot_commands())
-
-    print("✅ Telethon version:", telethon.__version__)
-    print("🚀 Telethon client listening...")
-    try:
-        await asyncio.Future()  # Keeps it alive
-    except (KeyboardInterrupt, SystemExit):
-        print("🛑 Shutdown triggered")
-    finally:
-        await app.stop()
-        await client.disconnect()
+    asyncio.create_task(run_commands())
+    print("🚀 Telethon client running...")
+    await asyncio.Future()
 
 if __name__ == '__main__':
-    nest_asyncio.apply()
     asyncio.run(main())
