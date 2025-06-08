@@ -48,10 +48,10 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app.add_handler(CommandHandler("register", register))
 
-# --- Handle media album by downloading before sending ---
+# --- Handle media albums ---
 @client.on(events.Album(chats=SOURCE_CHANNEL))
 async def handle_album(event):
-    print(f"[DEBUG] New post detected in source channel {SOURCE_CHANNEL}.")
+    print(f"[DEBUG] New album detected in source channel {SOURCE_CHANNEL}.")
     media_messages = event.messages
     print(f"[DEBUG] Detected {len(media_messages)} media items in album.")
 
@@ -84,6 +84,30 @@ async def handle_album(event):
         except Exception as e:
             print(f"[ERROR] Failed to send album to {cid}: {e}")
 
+# --- Handle all other messages (text or single media) ---
+@client.on(events.NewMessage(chats=SOURCE_CHANNEL))
+async def handle_message(event):
+    print(f"[DEBUG] New message detected in source channel {SOURCE_CHANNEL}.")
+
+    for cid in registered_channels:
+        try:
+            if event.media:
+                print("[DEBUG] Media message detected. Downloading...")
+                file_path = await event.download_media()
+                print(f"[DEBUG] Media downloaded: {file_path}")
+                await client.send_file(
+                    cid,
+                    file=file_path,
+                    caption=event.message or ""
+                )
+                os.remove(file_path)
+                print(f"[SUCCESS] Media message sent to {cid} ✅")
+            elif event.text:
+                await client.send_message(cid, event.text)
+                print(f"[SUCCESS] Text message sent to {cid} ✅")
+        except Exception as e:
+            print(f"[ERROR] Failed to forward message to {cid}: {e}")
+
 # --- Main loop ---
 async def main():
     async def run_bot_commands():
@@ -92,7 +116,7 @@ async def main():
         await app.updater.start_polling()
 
     asyncio.create_task(run_bot_commands())
-    print("🚀 Bot is running. Albums will be copied and posted after download completes.")
+    print("🚀 Bot is running. Albums and all messages will be copied and reposted.")
     print(f"🔍 Listening to source channel: {SOURCE_CHANNEL}")
     await asyncio.Future()
 
