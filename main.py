@@ -108,6 +108,11 @@ async def handle_message(event):
         except Exception as e:
             print(f"[ERROR] Failed to forward message to {cid}: {e}")
 
+# --- Catch-all debugging handler ---
+@client.on(events.NewMessage)
+async def debug_all(event):
+    print(f"[DEBUG][ALL] Received message from chat {event.chat_id}: {event.text or '[media]'}")
+
 # --- Main loop ---
 async def main():
     async def run_bot_commands():
