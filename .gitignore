@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 .replit
 replit.nix
+auth_telethon.py
