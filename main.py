@@ -2,11 +2,9 @@ import os
 import asyncio
 import json
 from telethon import TelegramClient, events
-from telethon.sessions import StringSession
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# --- Load from Environment ---
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -17,13 +15,12 @@ try:
 except:
     pass
 
-# --- Setup Clients ---
 client = TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# --- Persistent Channel Registry ---
 CHANNELS_FILE = "registered_channels.json"
 
+# --- Registered Channels ---
 def load_channels():
     if os.path.exists(CHANNELS_FILE):
         with open(CHANNELS_FILE, "r") as f:
@@ -36,7 +33,7 @@ def save_channels():
 
 registered_channels = load_channels()
 
-# --- /register Command ---
+# --- /register command ---
 async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /register <channel_id>")
@@ -51,31 +48,47 @@ async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 app.add_handler(CommandHandler("register", register))
 
-# --- Album Forwarding Handler ---
+# --- Handle media album by downloading before sending ---
 @client.on(events.Album(chats=SOURCE_CHANNEL))
 async def handle_album(event):
-    message_ids = [m.id for m in event.messages]
+    media_messages = event.messages
     for cid in registered_channels:
         try:
-            fwd = await client.forward_messages(
-                entity=cid,
-                messages=message_ids,
-                from_peer=SOURCE_CHANNEL,
-                hide_sender=True  # Requires Telethon >=1.41.0 from GitHub
-            )
-            print(f"[FORWARDED] Album to {cid} as native media group.")
-        except Exception as e:
-            print(f"[ERROR] Forwarding failed for {cid}: {e}")
+            print(f"[INFO] Downloading album from {SOURCE_CHANNEL}...")
+            downloaded = []
+            for m in media_messages:
+                file_path = await m.download_media()
+                downloaded.append((file_path, m.message or ""))
 
-# --- Main Event Loop ---
+            if downloaded:
+                print(f"[INFO] All files downloaded. Uploading to {cid}...")
+                await client.send_file(
+                    cid,
+                    files=[item[0] for item in downloaded],
+                    caption=downloaded[0][1],
+                    group=True,
+                )
+                print(f"[SUCCESS] Album sent to {cid} ✅")
+
+                # Optional cleanup
+                for f, _ in downloaded:
+                    try:
+                        os.remove(f)
+                    except Exception as cleanup_err:
+                        print(f"[WARN] Failed to delete {f}: {cleanup_err}")
+
+        except Exception as e:
+            print(f"[ERROR] Failed to send album to {cid}: {e}")
+
+# --- Main loop ---
 async def main():
-    async def run_commands():
+    async def run_bot_commands():
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
 
-    asyncio.create_task(run_commands())
-    print("🚀 Telethon client running...")
+    asyncio.create_task(run_bot_commands())
+    print("🚀 Bot is running. Albums will be copied and posted after download completes.")
     await asyncio.Future()
 
 if __name__ == '__main__':
