@@ -93,6 +93,7 @@ async def main():
 
     asyncio.create_task(run_bot_commands())
     print("🚀 Bot is running. Albums will be copied and posted after download completes.")
+    print(f"🔍 Listening to source channel: {SOURCE_CHANNEL}")
     await asyncio.Future()
 
 if __name__ == '__main__':
