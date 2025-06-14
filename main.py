@@ -36,10 +36,10 @@ target_chats = _config.get("target_chats", [])
 inc_pound = _config.get("inc_pound", {})
 inc_cart  = _config.get("inc_cart", {})
 
-# Dollar/number regex: match optional '$', digits, optional decimals, before '/P for'
-_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/[Pp]\s+for)")
-# Threshold determines which increment to apply
+# Threshold for deciding which increment to use
 THRESHOLD = 200
+# Regex to match optional '$', integer or decimal number, before '/P for' or '/p for'
+_pattern  = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/[Pp]\s+for)")
 
 # ─── Telethon setup ─────────────────────────────────
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
@@ -62,19 +62,19 @@ def keep_alive():
 # ─── Caption adjuster ──────────────────────────────
 def adjust_caption(text: str, chat: str) -> str:
     """
-    For values > THRESHOLD, add inc_pound[chat].
-    For values < THRESHOLD, add inc_cart[chat].
-    Preserves original decimal places.
+    For val > THRESHOLD, add inc_pound[chat].
+    For val <= THRESHOLD, add inc_cart[chat].
+    Preserves original decimal precision.
     """
     def repl(m):
         prefix, orig_num = m.group(1), m.group(2)
         val = float(orig_num)
         if val > THRESHOLD:
-            inc = inc_pound.get(chat, THRESHOLD)
+            inc = inc_pound.get(chat, 200)
         else:
-            inc = inc_cart.get(chat, 0)
+            inc = inc_cart.get(chat, 15)
         new_val = val + inc
-        # preserve decimal precision
+        # Preserve decimal places
         if "." in orig_num:
             dec_len = len(orig_num.split(".")[1])
             new_str = f"{new_val:.{dec_len}f}"
@@ -91,7 +91,7 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = ctx.args[0]
     if chat not in target_chats:
         target_chats.append(chat)
-        # set defaults: +200 for pound, +15 for cart
+        # Set defaults: +200 for pound, +15 for cart
         inc_pound[chat] = 200
         inc_cart[chat]  = 15
         _config.update({
@@ -113,7 +113,7 @@ async def increasepound(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         amt = float(val)
     except ValueError:
-        return await update.message.reply_text("Provide a valid number.")
+        return await update.message.reply_text("Please provide a valid number.")
     inc_pound[chat] = amt
     _config["inc_pound"] = inc_pound
     json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
@@ -130,7 +130,7 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         amt = float(val)
     except ValueError:
-        return await update.message.reply_text("Provide a valid number.")
+        return await update.message.reply_text("Please provide a valid number.")
     inc_cart[chat] = amt
     _config["inc_cart"] = inc_cart
     json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
@@ -141,15 +141,15 @@ media_buf = {}
 FLUSH_DELAY = 1.0
 
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
-    msgs = media_buf.pop(gid, None)
+    msgs = media_buf.pop(gid, [])
     if not msgs: return
     msgs.sort(key=lambda m: m.message_id)
     orig = msgs[0].caption or ""
     for chat in target_chats:
         new_cap = adjust_caption(orig, chat)
         media = []
-        for idx, m in enumerate(msgs):
-            cap = new_cap if idx == 0 else None
+        for i, m in enumerate(msgs):
+            cap = new_cap if i == 0 else None
             if m.photo:
                 media.append(InputMediaPhoto(m.photo[-1].file_id, caption=cap))
             elif m.video:
@@ -163,11 +163,13 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if str(update.effective_chat.id) != SOURCE_CHAT or not target_chats:
         return
+    # Handle media-groups
     if msg.media_group_id:
         media_buf.setdefault(msg.media_group_id, []).append(msg)
         loop = asyncio.get_event_loop()
         loop.call_later(FLUSH_DELAY, lambda: asyncio.create_task(flush_media_group(msg.media_group_id, ctx)))
         return
+    # Handle single media
     if msg.photo or msg.video or msg.document:
         orig = msg.caption or ""
         for chat in target_chats:
@@ -176,7 +178,7 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if new_cap != orig:
                 await ctx.bot.edit_message_caption(chat_id=copy.chat_id, message_id=copy.message_id, caption=new_cap)
         return
-    # ignore text-only
+    # Ignore text-only messages
 
 # ─── Entrypoint ────────────────────────────────────
 def main():
