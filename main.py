@@ -31,22 +31,21 @@ except (FileNotFoundError, json.JSONDecodeError):
     _config = {}
 
 # List of target channels
-# _config["target_chats"] = ["chat1", "chat2", ...]
 target_chats = _config.get("target_chats", [])
-# Per-chat increment mapping
-# _config["increments"] = {"chat1": 200, "chat2": 150, ...}
-increments = _config.get("increments", {})
+# Per-chat increments for values > threshold
+inc_pound = _config.get("inc_pound", {})
+# Per-chat increments for values < threshold
+inc_cart  = _config.get("inc_cart", {})
 
-# Threshold for applying increment (only values > threshold are adjusted)
+# Threshold value
 THRESHOLD = 200
 
-# Initialize Telethon client (persistent)
-# Use an in-memory session to avoid SQLite locking issues
+# Initialize Telethon client (memory session)
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
 
 async def init_telethon():
     await tele_client.start(bot_token=BOT_TOKEN)
-    # cache the source channel entity to avoid unresolved errors
+    # Cache source channel to avoid unresolved errors
     await tele_client.get_entity(int(SOURCE_CHAT))
 
 # ─── Keep-alive webserver ───────────────────────────
@@ -67,13 +66,18 @@ def keep_alive():
 # ─── Caption adjustment ─────────────────────────────
 _pattern = re.compile(r"(\$?)(\d+)(?=/P\s+for)")
 
-def adjust_caption(text: str, inc: int) -> str:
+def adjust_caption(text: str, chat: str) -> str:
     """
-    Adjust any number > THRESHOLD before '/P for' by adding inc.
+    If number > THRESHOLD: add inc_pound[chat]
+    If number < THRESHOLD: add inc_cart[chat]
     """
     def repl(m):
         prefix, val = m.group(1), int(m.group(2))
         if val > THRESHOLD:
+            inc = inc_pound.get(chat, 200)
+            new_val = val + inc
+        elif val < THRESHOLD:
+            inc = inc_cart.get(chat, 15)
             new_val = val + inc
         else:
             return m.group(0)
@@ -82,58 +86,69 @@ def adjust_caption(text: str, inc: int) -> str:
 
 # ─── /register handler ──────────────────────────────
 async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global target_chats, increments, _config
+    global target_chats, inc_pound, inc_cart, _config
     if not context.args:
-        return await update.message.reply_text(
-            "Usage: /register <chat_id_or_username>"
-        )
+        return await update.message.reply_text("Usage: /register <chat_id_or_username>")
     chat = context.args[0]
     if chat not in target_chats:
         target_chats.append(chat)
+        # set defaults
+        inc_pound[chat] = 200
+        inc_cart[chat]  = 15
         _config["target_chats"] = target_chats
-        default_inc = _config.get("default_increment", THRESHOLD)
-        increments[chat] = _config.get("increments", {}).get(chat, default_inc)
-        _config["increments"] = increments
+        _config["inc_pound"]    = inc_pound
+        _config["inc_cart"]     = inc_cart
         json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
     await update.message.reply_text(f"✅ Added target channel: {chat}")
 
-# ─── /increase handler ──────────────────────────────
-# Usage: /increase <chat_id_or_username> <amount>
-async def increase(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global increments, _config
+# ─── /increasepound handler ─────────────────────────
+# Usage: /increasepound <chat_id_or_username> <amount>
+async def increasepound(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global inc_pound, _config
     if len(context.args) != 2:
-        return await update.message.reply_text(
-            "Usage: /increase <chat_id_or_username> <amount>"
-        )
+        return await update.message.reply_text("Usage: /increasepound <chat> <amount>")
     chat, val_str = context.args
     if chat not in target_chats:
-        return await update.message.reply_text(
-            f"Channel {chat} not registered. Use /register first."
-        )
+        return await update.message.reply_text(f"Channel {chat} not registered.")
     try:
         amt = int(val_str)
     except ValueError:
         return await update.message.reply_text("Please provide an integer value.")
-    increments[chat] = amt
-    _config["increments"] = increments
+    inc_pound[chat] = amt
+    _config["inc_pound"] = inc_pound
     json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
-    await update.message.reply_text(
-        f"✅ Increment for {chat} set to: {amt}"
-    )
+    await update.message.reply_text(f"✅ Pound increment for {chat} set to +{amt}")
+
+# ─── /increasecart handler ──────────────────────────
+# Usage: /increasecart <chat_id_or_username> <amount>
+async def increasecart(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global inc_cart, _config
+    if len(context.args) != 2:
+        return await update.message.reply_text("Usage: /increasecart <chat> <amount>")
+    chat, val_str = context.args
+    if chat not in target_chats:
+        return await update.message.reply_text(f"Channel {chat} not registered.")
+    try:
+        amt = int(val_str)
+    except ValueError:
+        return await update.message.reply_text("Please provide an integer value.")
+    inc_cart[chat] = amt
+    _config["inc_cart"] = inc_cart
+    json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
+    await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
 # ─── Media-group flushing ───────────────────────────
 media_buffers = {}
-FLUSH_DELAY   = 1.0  # seconds
+FLUSH_DELAY   = 1.0
 
 async def flush_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
     group = media_buffers.pop(media_group_id, None)
     if not group or not target_chats:
         return
     group.sort(key=lambda m: m.message_id)
-    orig_caption = group[0].caption or ""
+    orig = group[0].caption or ""
     for chat in target_chats:
-        inc = increments.get(chat, THRESHOLD)
-        new_cap = adjust_caption(orig_caption, inc)
+        new_cap = adjust_caption(orig, chat)
         media = []
         for idx, msg in enumerate(group):
             cap = new_cap if idx == 0 else None
@@ -151,51 +166,45 @@ async def forward_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if str(update.effective_chat.id) != SOURCE_CHAT or not target_chats:
         return
 
-    # Handle media-groups only
+    # media-group only
     if msg.media_group_id:
         media_buffers.setdefault(msg.media_group_id, []).append(msg)
         loop = asyncio.get_event_loop()
         loop.call_later(
             FLUSH_DELAY,
-            lambda: asyncio.create_task(
-                flush_media_group(msg.media_group_id, context)
-            )
+            lambda: asyncio.create_task(flush_media_group(msg.media_group_id, context))
         )
         return
 
-    # Handle single-media only
+    # single-media only
     if msg.photo or msg.video or msg.document:
-        orig_caption = msg.caption or ""
+        orig = msg.caption or ""
         for chat in target_chats:
-            inc = increments.get(chat, THRESHOLD)
-            new_cap = adjust_caption(orig_caption, inc)
+            new_cap = adjust_caption(orig, chat)
             kwargs = {
                 'chat_id': chat,
                 'from_chat_id': msg.chat.id,
                 'message_id': msg.message_id,
             }
-            if new_cap != orig_caption:
+            if new_cap != orig:
                 kwargs['caption'] = new_cap
             await context.bot.copy_message(**kwargs)
         return
-
-    # Do not forward text-only messages
-    return
+    # ignore text-only
 
 # ─── Entrypoint ────────────────────────────────────
 def main():
-    # Initialize Telethon and cache source channel entity
+    # Init Telethon
     asyncio.get_event_loop().run_until_complete(init_telethon())
-
-    # Start keep-alive server
+    # Keep-alive server
     keep_alive()
-
-    # Build and run Telegram bot
+    # Build Telegram bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("register", register))
-    app.add_handler(CommandHandler("increase", increase))
+    app.add_handler(CommandHandler("increasepound", increasepound))
+    app.add_handler(CommandHandler("increasecart", increasecart))
     app.add_handler(MessageHandler(filters.ALL, forward_handler))
-    print("Bot is up—keep-alive and Telethon initialized.")
+    print("Bot is up—running with per-channel increments.")
     app.run_polling()
 
 if __name__ == "__main__":
