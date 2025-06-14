@@ -1,266 +1,200 @@
 import os
+import re
+import json
 import asyncio
-from telethon import TelegramClient, events
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, InputMediaPhoto, InputMediaDocument
-from telethon.errors import SessionPasswordNeededError
-import logging
-
-# Try to load dotenv if available
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    print("python-dotenv not installed. Reading from system environment variables.")
-
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+import threading
+from dotenv import load_dotenv
+from flask import Flask
+from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
 )
-logger = logging.getLogger(__name__)
+from telethon import TelegramClient
 
-# Configuration from .env
-API_ID = int(os.getenv('API_ID'))
-API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-SOURCE_CHANNEL = os.getenv('SOURCE_CHANNEL')
-PHONE_NUMBER = os.getenv('PHONE_NUMBER')
+# ─── Load env & config ─────────────────────────────
+load_dotenv()
+BOT_TOKEN    = os.getenv("BOT_TOKEN")
+SOURCE_CHAT  = os.getenv("SOURCE_CHANNEL")  # source channel ID or @username
+API_ID       = int(os.getenv("API_ID"))
+API_HASH     = os.getenv("API_HASH")
+CONFIG_FILE  = "config.json"
 
-# Storage for registered target channels
-target_channels = set()
-target_channels_file = 'target_channels.txt'
+# Load or initialize config
+try:
+    _config = json.load(open(CONFIG_FILE))
+except (FileNotFoundError, json.JSONDecodeError):
+    _config = {}
 
-# Session directory (for Docker volumes)
-session_dir = os.getenv('TELETHON_SESSION_DIR', '.')
-user_session_path = os.path.join(session_dir, 'user_session')
-bot_session_path = os.path.join(session_dir, 'bot_session')
+# List of target channels
+# _config["target_chats"] = ["chat1", "chat2", ...]
+target_chats = _config.get("target_chats", [])
+# Per-chat increment mapping
+# _config["increments"] = {"chat1": 200, "chat2": 150, ...}
+increments = _config.get("increments", {})
 
-# Initialize clients
-user_client = TelegramClient(user_session_path, API_ID, API_HASH)
-bot_client = TelegramClient(bot_session_path, API_ID, API_HASH)
+# Threshold for applying increment (only values > threshold are adjusted)
+THRESHOLD = 200
 
-async def load_target_channels():
-    """Load target channels from file"""
-    try:
-        if os.path.exists(target_channels_file):
-            with open(target_channels_file, 'r') as f:
-                for line in f:
-                    channel = line.strip()
-                    if channel:
-                        target_channels.add(channel)
-            logger.info(f"Loaded {len(target_channels)} target channels")
-    except Exception as e:
-        logger.error(f"Error loading target channels: {e}")
+# Initialize Telethon client (persistent)
+tele_client = TelegramClient("history_session", API_ID, API_HASH)
 
-async def save_target_channels():
-    """Save target channels to file"""
-    try:
-        with open(target_channels_file, 'w') as f:
-            for channel in target_channels:
-                f.write(f"{channel}\n")
-        logger.info("Target channels saved")
-    except Exception as e:
-        logger.error(f"Error saving target channels: {e}")
+async def init_telethon():
+    await tele_client.start(bot_token=BOT_TOKEN)
+    # cache the source channel entity to avoid unresolved errors
+    await tele_client.get_entity(int(SOURCE_CHAT))
 
-async def start_user_client():
-    """Start the user client for forwarding"""
-    await user_client.start(phone=PHONE_NUMBER)
-    logger.info("User client started successfully")
+# ─── Keep-alive webserver ───────────────────────────
+webapp = Flask(__name__)
 
-async def start_bot_client():
-    """Start the bot client for commands"""
-    await bot_client.start(bot_token=BOT_TOKEN)
-    logger.info("Bot client started successfully")
+@webapp.route("/")
+def ping():
+    return "OK", 200
 
-@bot_client.on(events.NewMessage(pattern='/start'))
-async def start_command(event):
-    """Handle /start command"""
-    await event.reply(
-        "Welcome to the Channel Forwarding Bot!\n\n"
-        "Commands:\n"
-        "/register <channel_id> - Register a target channel\n"
-        "/unregister <channel_id> - Unregister a target channel\n"
-        "/list - List all registered target channels\n"
-        "/help - Show this help message\n\n"
-        "Channel ID can be:\n"
-        "- Username (e.g., @channel_name)\n"
-        "- Numeric ID (e.g., -1001234567890)"
+def keep_alive():
+    port = int(os.environ.get("PORT", 8080))
+    thread = threading.Thread(
+        target=lambda: webapp.run(host="0.0.0.0", port=port)
     )
+    thread.daemon = True
+    thread.start()
 
-@bot_client.on(events.NewMessage(pattern='/help'))
-async def help_command(event):
-    """Handle /help command"""
-    await start_command(event)
+# ─── Caption adjustment ─────────────────────────────
+_pattern = re.compile(r"(\$?)(\d+)(?=/P\s+for)")
 
-@bot_client.on(events.NewMessage(pattern='/register'))
-async def register_command(event):
-    """Handle /register command"""
-    try:
-        # Extract channel ID from command
-        parts = event.message.text.split()
-        if len(parts) < 2:
-            await event.reply("Usage: /register <channel_id>")
-            return
-        
-        channel_id = parts[1]
-        
-        # Verify the channel exists and bot has access
-        try:
-            # Try to get channel entity using user client
-            channel = await user_client.get_entity(channel_id)
-            
-            # Add to target channels
-            target_channels.add(channel_id)
-            await save_target_channels()
-            
-            await event.reply(f"✅ Successfully registered channel: {channel_id}")
-            logger.info(f"Registered new target channel: {channel_id}")
-            
-        except Exception as e:
-            await event.reply(f"❌ Error: Could not access channel {channel_id}. Make sure the bot has access to it.")
-            logger.error(f"Error registering channel {channel_id}: {e}")
-            
-    except Exception as e:
-        await event.reply(f"❌ Error: {str(e)}")
-        logger.error(f"Error in register command: {e}")
-
-@bot_client.on(events.NewMessage(pattern='/unregister'))
-async def unregister_command(event):
-    """Handle /unregister command"""
-    try:
-        parts = event.message.text.split()
-        if len(parts) < 2:
-            await event.reply("Usage: /unregister <channel_id>")
-            return
-        
-        channel_id = parts[1]
-        
-        if channel_id in target_channels:
-            target_channels.remove(channel_id)
-            await save_target_channels()
-            await event.reply(f"✅ Successfully unregistered channel: {channel_id}")
-            logger.info(f"Unregistered target channel: {channel_id}")
+def adjust_caption(text: str, inc: int) -> str:
+    """
+    Adjust any number > THRESHOLD before '/P for' by adding inc.
+    """
+    def repl(m):
+        prefix, val = m.group(1), int(m.group(2))
+        if val > THRESHOLD:
+            new_val = val + inc
         else:
-            await event.reply(f"❌ Channel {channel_id} is not registered")
-            
-    except Exception as e:
-        await event.reply(f"❌ Error: {str(e)}")
-        logger.error(f"Error in unregister command: {e}")
+            return m.group(0)
+        return f"{prefix}{new_val}"
+    return _pattern.sub(repl, text)
 
-@bot_client.on(events.NewMessage(pattern='/list'))
-async def list_command(event):
-    """Handle /list command"""
-    if target_channels:
-        channels_list = "\n".join(f"• {channel}" for channel in target_channels)
-        await event.reply(f"📋 Registered target channels:\n\n{channels_list}")
-    else:
-        await event.reply("No target channels registered yet. Use /register to add channels.")
+# ─── /register handler ──────────────────────────────
+async def register(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global target_chats, increments, _config
+    if not context.args:
+        return await update.message.reply_text(
+            "Usage: /register <chat_id_or_username>"
+        )
+    chat = context.args[0]
+    if chat not in target_chats:
+        target_chats.append(chat)
+        _config["target_chats"] = target_chats
+        default_inc = _config.get("default_increment", THRESHOLD)
+        increments[chat] = _config.get("increments", {}).get(chat, default_inc)
+        _config["increments"] = increments
+        json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
+    await update.message.reply_text(f"✅ Added target channel: {chat}")
 
-@user_client.on(events.NewMessage(chats=SOURCE_CHANNEL))
-async def forward_message(event):
-    """Forward messages from source channel to all target channels"""
-    if not target_channels:
-        logger.warning("No target channels registered")
-        return
-    
-    message = event.message
-    
-    # Forward to each target channel
-    for target in target_channels:
-        try:
-            # Check if it's a grouped media message
-            if message.grouped_id:
-                # Handle grouped media
-                album_messages = []
-                
-                # Get all messages in the group
-                async for msg in user_client.iter_messages(
-                    SOURCE_CHANNEL, 
-                    limit=10,
-                    min_id=message.id - 10,
-                    max_id=message.id + 10
-                ):
-                    if msg.grouped_id == message.grouped_id:
-                        album_messages.append(msg)
-                
-                # Sort by ID to maintain order
-                album_messages.sort(key=lambda x: x.id)
-                
-                # Prepare media list
-                media_list = []
-                caption = None
-                
-                for msg in album_messages:
-                    if msg.media:
-                        if isinstance(msg.media, MessageMediaPhoto):
-                            media = InputMediaPhoto(
-                                id=msg.media.photo.id,
-                                access_hash=msg.media.photo.access_hash,
-                                file_reference=msg.media.photo.file_reference
-                            )
-                        elif isinstance(msg.media, MessageMediaDocument):
-                            media = InputMediaDocument(
-                                id=msg.media.document.id,
-                                access_hash=msg.media.document.access_hash,
-                                file_reference=msg.media.document.file_reference
-                            )
-                        else:
-                            continue
-                        
-                        media_list.append(media)
-                        
-                        # Use the first available caption
-                        if msg.text and not caption:
-                            caption = msg.text
-                
-                # Send album to target channel
-                if media_list:
-                    await user_client.send_file(
-                        target,
-                        media_list,
-                        caption=caption
-                    )
-                    logger.info(f"Forwarded album to {target}")
-            
-            else:
-                # Handle single message (text or media)
-                if message.media:
-                    # Forward media with caption
-                    await user_client.send_file(
-                        target,
-                        message.media,
-                        caption=message.text
-                    )
-                    logger.info(f"Forwarded media message to {target}")
-                else:
-                    # Forward text only
-                    await user_client.send_message(
-                        target,
-                        message.text,
-                        formatting_entities=message.entities
-                    )
-                    logger.info(f"Forwarded text message to {target}")
-                    
-        except Exception as e:
-            logger.error(f"Error forwarding to {target}: {e}")
-
-async def main():
-    """Main function to run both clients"""
-    # Load saved target channels
-    await load_target_channels()
-    
-    # Start both clients
-    await start_user_client()
-    await start_bot_client()
-    
-    logger.info(f"Bot is running. Monitoring source channel: {SOURCE_CHANNEL}")
-    logger.info(f"Registered target channels: {len(target_channels)}")
-    
-    # Keep the clients running
-    await asyncio.gather(
-        user_client.run_until_disconnected(),
-        bot_client.run_until_disconnected()
+# ─── /increase handler ──────────────────────────────
+# Usage: /increase <chat_id_or_username> <amount>
+async def increase(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global increments, _config
+    if len(context.args) != 2:
+        return await update.message.reply_text(
+            "Usage: /increase <chat_id_or_username> <amount>"
+        )
+    chat, val_str = context.args
+    if chat not in target_chats:
+        return await update.message.reply_text(
+            f"Channel {chat} not registered. Use /register first."
+        )
+    try:
+        amt = int(val_str)
+    except ValueError:
+        return await update.message.reply_text("Please provide an integer value.")
+    increments[chat] = amt
+    _config["increments"] = increments
+    json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
+    await update.message.reply_text(
+        f"✅ Increment for {chat} set to: {amt}"
     )
 
-if __name__ == '__main__':
-    asyncio.run(main())
+# ─── Media-group flushing ───────────────────────────
+media_buffers = {}
+FLUSH_DELAY   = 1.0  # seconds
+
+async def flush_media_group(media_group_id: str, context: ContextTypes.DEFAULT_TYPE):
+    group = media_buffers.pop(media_group_id, None)
+    if not group or not target_chats:
+        return
+    group.sort(key=lambda m: m.message_id)
+    orig_caption = group[0].caption or ""
+    for chat in target_chats:
+        inc = increments.get(chat, THRESHOLD)
+        new_cap = adjust_caption(orig_caption, inc)
+        media = []
+        for idx, msg in enumerate(group):
+            cap = new_cap if idx == 0 else None
+            if msg.photo:
+                media.append(InputMediaPhoto(msg.photo[-1].file_id, caption=cap))
+            elif msg.video:
+                media.append(InputMediaVideo(msg.video.file_id, caption=cap))
+            else:
+                media.append(InputMediaDocument(msg.document.file_id, caption=cap))
+        await context.bot.send_media_group(chat_id=chat, media=media)
+
+# ─── Forward handler ─────────────────────────────────
+async def forward_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    if str(update.effective_chat.id) != SOURCE_CHAT or not target_chats:
+        return
+
+    # Handle media-groups only
+    if msg.media_group_id:
+        media_buffers.setdefault(msg.media_group_id, []).append(msg)
+        loop = asyncio.get_event_loop()
+        loop.call_later(
+            FLUSH_DELAY,
+            lambda: asyncio.create_task(
+                flush_media_group(msg.media_group_id, context)
+            )
+        )
+        return
+
+    # Handle single-media only
+    if msg.photo or msg.video or msg.document:
+        orig_caption = msg.caption or ""
+        for chat in target_chats:
+            inc = increments.get(chat, THRESHOLD)
+            new_cap = adjust_caption(orig_caption, inc)
+            kwargs = {
+                'chat_id': chat,
+                'from_chat_id': msg.chat.id,
+                'message_id': msg.message_id,
+            }
+            if new_cap != orig_caption:
+                kwargs['caption'] = new_cap
+            await context.bot.copy_message(**kwargs)
+        return
+
+    # Do not forward text-only messages
+    return
+
+# ─── Entrypoint ────────────────────────────────────
+def main():
+    # Initialize Telethon and cache source channel entity
+    asyncio.get_event_loop().run_until_complete(init_telethon())
+
+    # Start keep-alive server
+    keep_alive()
+
+    # Build and run Telegram bot
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("register", register))
+    app.add_handler(CommandHandler("increase", increase))
+    app.add_handler(MessageHandler(filters.ALL, forward_handler))
+    print("Bot is up—keep-alive and Telethon initialized.")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
