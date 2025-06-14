@@ -32,14 +32,14 @@ except (FileNotFoundError, json.JSONDecodeError):
 
 # List of target channels
 target_chats = _config.get("target_chats", [])
-# Per-channel increments for >threshold and <threshold
+# Per-channel increments for > and < threshold
 inc_pound = _config.get("inc_pound", {})
 inc_cart  = _config.get("inc_cart", {})
 
-# Threshold
+# Dollar/number regex: match optional '$', digits, optional decimals, before '/P for'
+_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/[Pp]\s+for)")
+# Threshold determines which increment to apply
 THRESHOLD = 200
-# Regex: optional '$', digits, then '/P for' or '/p for'
-_pattern = re.compile(r"(\$?)(\d+)(?=/[Pp]\s+for)")
 
 # ─── Telethon setup ─────────────────────────────────
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
@@ -48,7 +48,7 @@ async def init_telethon():
     await tele_client.start(bot_token=BOT_TOKEN)
     await tele_client.get_entity(int(SOURCE_CHAT))
 
-# ─── Keep-alive server ─────────────────────────────
+# ─── Keep-alive server ──────────────────────────────
 app = Flask(__name__)
 @app.route("/")
 def ping(): return "OK", 200
@@ -62,20 +62,25 @@ def keep_alive():
 # ─── Caption adjuster ──────────────────────────────
 def adjust_caption(text: str, chat: str) -> str:
     """
-    If val > THRESHOLD: add inc_pound[chat]
-    If val < THRESHOLD: add inc_cart[chat]
+    For values > THRESHOLD, add inc_pound[chat].
+    For values < THRESHOLD, add inc_cart[chat].
+    Preserves original decimal places.
     """
     def repl(m):
-        prefix, val = m.group(1), int(m.group(2))
+        prefix, orig_num = m.group(1), m.group(2)
+        val = float(orig_num)
         if val > THRESHOLD:
-            inc = inc_pound.get(chat, 200)
-            new_val = val + inc
-        elif val < THRESHOLD:
-            inc = inc_cart.get(chat, 15)
-            new_val = val + inc
+            inc = inc_pound.get(chat, THRESHOLD)
         else:
-            return m.group(0)
-        return f"{prefix}{new_val}"
+            inc = inc_cart.get(chat, 0)
+        new_val = val + inc
+        # preserve decimal precision
+        if "." in orig_num:
+            dec_len = len(orig_num.split(".")[1])
+            new_str = f"{new_val:.{dec_len}f}"
+        else:
+            new_str = str(int(new_val))
+        return f"{prefix}{new_str}"
     return _pattern.sub(repl, text)
 
 # ─── /register ──────────────────────────────────────
@@ -86,12 +91,14 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat = ctx.args[0]
     if chat not in target_chats:
         target_chats.append(chat)
-        # set defaults
+        # set defaults: +200 for pound, +15 for cart
         inc_pound[chat] = 200
         inc_cart[chat]  = 15
-        _config["target_chats"] = target_chats
-        _config["inc_pound"]    = inc_pound
-        _config["inc_cart"]     = inc_cart
+        _config.update({
+            "target_chats": target_chats,
+            "inc_pound": inc_pound,
+            "inc_cart": inc_cart,
+        })
         json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
     await update.message.reply_text(f"✅ Added target channel: {chat}")
 
@@ -100,13 +107,13 @@ async def increasepound(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global inc_pound, _config
     if len(ctx.args) != 2:
         return await update.message.reply_text("Usage: /increasepound <chat> <amount>")
-    chat, s = ctx.args
+    chat, val = ctx.args
     if chat not in target_chats:
-        return await update.message.reply_text(f"Channel {chat} not registered.")
+        return await update.message.reply_text("Channel not registered.")
     try:
-        amt = int(s)
+        amt = float(val)
     except ValueError:
-        return await update.message.reply_text("Please provide an integer.")
+        return await update.message.reply_text("Provide a valid number.")
     inc_pound[chat] = amt
     _config["inc_pound"] = inc_pound
     json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
@@ -117,33 +124,32 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     global inc_cart, _config
     if len(ctx.args) != 2:
         return await update.message.reply_text("Usage: /increasecart <chat> <amount>")
-    chat, s = ctx.args
+    chat, val = ctx.args
     if chat not in target_chats:
-        return await update.message.reply_text(f"Channel {chat} not registered.")
+        return await update.message.reply_text("Channel not registered.")
     try:
-        amt = int(s)
+        amt = float(val)
     except ValueError:
-        return await update.message.reply_text("Please provide an integer.")
+        return await update.message.reply_text("Provide a valid number.")
     inc_cart[chat] = amt
     _config["inc_cart"] = inc_cart
     json.dump(_config, open(CONFIG_FILE, "w"), indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
 # ─── Media-group flush ─────────────────────────────
-media_buffers = {}
-FLUSH_DELAY   = 1.0
+media_buf = {}
+FLUSH_DELAY = 1.0
 
-async def flush_media_group(group_id: str, ctx: ContextTypes.DEFAULT_TYPE):
-    msgs = media_buffers.pop(group_id, None)
-    if not msgs or not target_chats:
-        return
+async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
+    msgs = media_buf.pop(gid, None)
+    if not msgs: return
     msgs.sort(key=lambda m: m.message_id)
     orig = msgs[0].caption or ""
     for chat in target_chats:
         new_cap = adjust_caption(orig, chat)
         media = []
-        for i, m in enumerate(msgs):
-            cap = new_cap if i == 0 else None
+        for idx, m in enumerate(msgs):
+            cap = new_cap if idx == 0 else None
             if m.photo:
                 media.append(InputMediaPhoto(m.photo[-1].file_id, caption=cap))
             elif m.video:
@@ -157,21 +163,18 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if str(update.effective_chat.id) != SOURCE_CHAT or not target_chats:
         return
-    # media group
     if msg.media_group_id:
-        media_buffers.setdefault(msg.media_group_id, []).append(msg)
+        media_buf.setdefault(msg.media_group_id, []).append(msg)
         loop = asyncio.get_event_loop()
         loop.call_later(FLUSH_DELAY, lambda: asyncio.create_task(flush_media_group(msg.media_group_id, ctx)))
         return
-    # single media
     if msg.photo or msg.video or msg.document:
         orig = msg.caption or ""
         for chat in target_chats:
+            copy = await ctx.bot.copy_message(chat_id=chat, from_chat_id=msg.chat.id, message_id=msg.message_id)
             new_cap = adjust_caption(orig, chat)
-            kwargs = {'chat_id': chat, 'from_chat_id': msg.chat.id, 'message_id': msg.message_id}
             if new_cap != orig:
-                kwargs['caption'] = new_cap
-            await ctx.bot.copy_message(**kwargs)
+                await ctx.bot.edit_message_caption(chat_id=copy.chat_id, message_id=copy.message_id, caption=new_cap)
         return
     # ignore text-only
 
@@ -184,7 +187,7 @@ def main():
     bot.add_handler(CommandHandler("increasepound", increasepound))
     bot.add_handler(CommandHandler("increasecart", increasecart))
     bot.add_handler(MessageHandler(filters.ALL, forward_handler))
-    print("Bot is up—running with per-channel increments.")
+    print("Bot is up—running with decimal support.")
     bot.run_polling()
 
 if __name__ == "__main__":
