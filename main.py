@@ -14,6 +14,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from telethon import TelegramClient
+from telethon.sessions import MemorySession
 
 # ─── Load env & config ─────────────────────────────
 load_dotenv()
@@ -40,7 +41,8 @@ increments = _config.get("increments", {})
 THRESHOLD = 200
 
 # Initialize Telethon client (persistent)
-tele_client = TelegramClient("history_session", API_ID, API_HASH)
+# Use an in-memory session to avoid SQLite locking issues
+tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
 
 async def init_telethon():
     await tele_client.start(bot_token=BOT_TOKEN)
