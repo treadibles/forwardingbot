@@ -135,30 +135,38 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
     Forward all historical messages from the source into the specified target channel,
     applying per-channel pound/cart increments.
-    Requires an existing logged-in user session for history_client.
+    Requires an existing user session for history_client.
     """
-    # Validate args
+    # Validate arguments
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
     chat = ctx.args[0]
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
 
+    # Notify user
     notify = await update.message.reply_text("🔄 Forwarding history… please wait")
     count = 0
 
-    # Ensure user session is active
-    if not history_client.is_connected() or not await history_client.is_user_authorized():
+    # Ensure history_client is connected and authorized
+    try:
+        if not history_client.is_connected():
+            await history_client.connect()
+        if not await history_client.is_user_authorized():
+            await history_client.start()  # attempt to reauthorize via session
+    except Exception as e:
+        return await notify.edit_text(f"❌ History session error: {e}")
+    if not await history_client.is_user_authorized():
         return await notify.edit_text("❌ History forwarding unavailable: user session not authorized.")
 
-    # Fetch the source channel entity
+    # Fetch source channel entity
     try:
         src_entity = await history_client.get_entity(int(SOURCE_CHAT))
     except Exception as e:
         return await notify.edit_text(f"❌ Cannot access source channel: {e}")
 
-    # Iterate and forward
-    async for orig in history_client.iter_messages(src_entity, reverse=True):
+    # Iterate and forward messages
+    async for orig in history_client.iter_messages(src_entity, reverse=True): in history_client.iter_messages(src_entity, reverse=True):
         try:
             if orig.photo or orig.video or orig.document:
                 sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=orig.id)
