@@ -3,6 +3,7 @@ import re
 import json
 import asyncio
 import threading
+import logging
 from dotenv import load_dotenv
 from flask import Flask
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -15,8 +16,13 @@ from telegram.ext import (
 )
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
+from telethon.errors import FloodWaitError
 
-# ─── Setup and config ───────────────────────────────
+# ─── Logging setup ──────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ─── Load env & config ─────────────────────────────
 load_dotenv()
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
 SOURCE_CHAT = os.getenv("SOURCE_CHANNEL")
@@ -24,29 +30,39 @@ API_ID      = int(os.getenv("API_ID"))
 API_HASH    = os.getenv("API_HASH")
 CONFIG_FILE = "config.json"
 
-# Load or initialize config
+# Load or initialize config file
+target_chats = []
+inc_pound = {}
+inc_cart = {}
 try:
     _config = json.load(open(CONFIG_FILE))
+    target_chats = _config.get("target_chats", [])
+    inc_pound = _config.get("inc_pound", {})
+    inc_cart = _config.get("inc_cart", {})
 except (FileNotFoundError, json.JSONDecodeError):
     _config = {}
 
-# Targets and increments
-target_chats = _config.get("target_chats", [])
-inc_pound    = _config.get("inc_pound", {})
-inc_cart     = _config.get("inc_cart", {})
-
 # Threshold and regex
 THRESHOLD = 200
-_pattern  = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))", re.IGNORECASE)
+_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))", re.IGNORECASE)
 
-# ─── Telethon client init ────────────────────────────
+# ─── Telethon client init ───────────────────────────
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
-
 async def init_telethon():
-    await tele_client.start(bot_token=BOT_TOKEN)
-    await tele_client.get_entity(int(SOURCE_CHAT))
+    try:
+        await tele_client.start(bot_token=BOT_TOKEN)
+    except FloodWaitError as e:
+        logger.error(f"Telethon FloodWait: wait {e.seconds}s; skipping init.")
+        return
+    except Exception as e:
+        logger.error(f"Error starting Telethon: {e}")
+        return
+    try:
+        await tele_client.get_entity(int(SOURCE_CHAT))
+    except Exception as e:
+        logger.error(f"Failed to cache source channel {SOURCE_CHAT}: {e}")
 
-# ─── Flask keep-alive server ─────────────────────────
+# ─── Flask keep-alive ───────────────────────────────
 app = Flask(__name__)
 @app.route("/")
 def ping():
@@ -54,11 +70,9 @@ def ping():
 
 def keep_alive():
     port = int(os.environ.get("PORT", 8080))
-    thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port)
-    )
-    thread.daemon = True
-    thread.start()
+    t = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port))
+    t.daemon = True
+    t.start()
 
 # ─── Caption adjuster ───────────────────────────────
 def adjust_caption(text: str, chat: str) -> str:
@@ -83,12 +97,10 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat not in target_chats:
         target_chats.append(chat)
         inc_pound[chat] = 200
-        inc_cart[chat]  = 15
-        _config.update({
-            "target_chats": target_chats,
-            "inc_pound": inc_pound,
-            "inc_cart": inc_cart,
-        })
+        inc_cart[chat] = 15
+        _config["target_chats"] = target_chats
+        _config["inc_pound"] = inc_pound
+        _config["inc_cart"] = inc_cart
         with open(CONFIG_FILE, "w") as f:
             json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Added target channel: {chat}")
@@ -160,7 +172,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             continue
     await msg.edit_text(f"✅ History forwarded: {count} messages to {chat}.")
 
-# ─── Live forward media-group flush ────────────────
+# ─── Live media-group flushing ──────────────────────
 media_buf = {}
 FLUSH_DELAY = 1.0
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
@@ -220,7 +232,7 @@ def main():
     bot.add_handler(CommandHandler("increasepound", increasepound))
     bot.add_handler(CommandHandler("increasecart", increasecart))
     bot.add_handler(MessageHandler(filters.ALL, forward_handler))
-    print("Bot is running with history and live forwarding.")
+    logger.info("Bot up and running with history support.")
     bot.run_polling()
 
 if __name__ == "__main__":
