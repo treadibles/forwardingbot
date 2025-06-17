@@ -124,17 +124,13 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
 # ─── Initialize persistent Telethon user client for history ────
-PHONE_NUMBER = os.getenv("PHONE_NUMBER")
-history_client = TelegramClient('history.session', API_ID, API_HASH)
+# Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
+SESSION_STRING = os.getenv("SESSION_STRING")
+if not SESSION_STRING:
+    raise RuntimeError("SESSION_STRING not set in .env. Please generate a Telethon string session.")
+history_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-async def init_history_client():
-    """
-    Sign in the user session for history fetching. Prompts for code on first run.
-    """
-    await history_client.start(phone=PHONE_NUMBER)
-
-
-# ─── /forward handler (history) ────────────────────
+# ─── /forward handler (history) (history) ────────────────────
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
     Forward all historical messages from the source into the specified target channel,
