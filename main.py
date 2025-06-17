@@ -177,23 +177,26 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         groups.setdefault(key, []).append(msg)
 
     # Forward each group
+    temp_dir = tempfile.mkdtemp(prefix="history_")
     for key, group in groups.items():
-        # Sort group by date to preserve order
         group.sort(key=lambda m: m.date)
         if len(group) > 1 and group[0].grouped_id:
-            # Album: send as media_group
-            # Compute adjusted caption once
+            # Album: download all items and send as a media_group
             orig_cap = group[0].message or ''
             new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
             media = []
             for idx, m in enumerate(group):
+                # Download each file to temp
+                path = os.path.join(temp_dir, f"{m.id}")
+                await history_client.download_media(m, file=path)
                 cap = new_cap if idx == 0 else None
-                if m.photo:
-                    media.append(InputMediaPhoto(m.photo[-1].file_id, caption=cap))
-                elif m.video:
-                    media.append(InputMediaVideo(m.video.file_id, caption=cap))
+                # Choose correct InputMedia type
+                if m.photo or path.lower().endswith(('.jpg','.png','.jpeg')):
+                    media.append(InputMediaPhoto(open(path, 'rb'), caption=cap))
+                elif m.video or path.lower().endswith(('.mp4','.mov','.avi')):
+                    media.append(InputMediaVideo(open(path, 'rb'), caption=cap))
                 else:
-                    media.append(InputMediaDocument(m.document.file_id, caption=cap))
+                    media.append(InputMediaDocument(open(path, 'rb'), caption=cap))
             try:
                 await ctx.bot.send_media_group(chat_id=chat, media=media)
                 count += len(media)
@@ -204,7 +207,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             m = group[0]
             try:
                 sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=m.id)
-                orig_cap = m.caption or m.message or ''
+                orig_cap = m.message or ''
                 new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
                 if new_cap and new_cap != orig_cap:
                     await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
@@ -212,7 +215,16 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+    # Cleanup
+    try:
+        for f in os.listdir(temp_dir):
+            os.remove(os.path.join(temp_dir, f))
+        os.rmdir(temp_dir)
+    except Exception:
+        pass
+
     # Done
+    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
     await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
