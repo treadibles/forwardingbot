@@ -149,6 +149,11 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # If Telethon couldn't initialize (e.g. flood wait), abort
+    if target_entity is None:
+        return await update.message.reply_text(
+            "❌ History forwarding unavailable right now; please try again later."
+        )
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
     chat = ctx.args[0]
