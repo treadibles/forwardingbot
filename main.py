@@ -186,15 +186,14 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
             media = []
             for idx, m in enumerate(group):
-                # Download each file to temp, preserving extension
-                ext = get_extension(m) or ''
-                path = os.path.join(temp_dir, f"{m.id}{ext}")
-                await history_client.download_media(m, file=path)
+                # Download media into temp_dir, returns the file path
+                path = await history_client.download_media(m, file=temp_dir)
                 cap = new_cap if idx == 0 else None
-                # Choose correct InputMedia type
-                if m.photo or path.lower().endswith(('.jpg','.png','.jpeg')):
+                # Determine media type by file extension
+                lower = path.lower()
+                if lower.endswith(('.jpg', '.jpeg', '.png', '.gif')):
                     media.append(InputMediaPhoto(open(path, 'rb'), caption=cap))
-                elif m.video or path.lower().endswith(('.mp4','.mov','.avi')):
+                elif lower.endswith(('.mp4', '.mov', '.avi', '.mkv')):
                     media.append(InputMediaVideo(open(path, 'rb'), caption=cap))
                 else:
                     media.append(InputMediaDocument(open(path, 'rb'), caption=cap))
@@ -208,7 +207,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             m = group[0]
             try:
                 sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=m.id)
-                orig_cap = m.message or ''
+                orig_cap = m.caption or m.message or ''
                 new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
                 if new_cap and new_cap != orig_cap:
                     await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
@@ -216,7 +215,10 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-    # Cleanup
+    # Cleanup temporary files
+    ... # existing cleanup code
+
+    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
     try:
         for f in os.listdir(temp_dir):
             os.remove(os.path.join(temp_dir, f))
