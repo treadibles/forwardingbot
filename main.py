@@ -160,12 +160,42 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Channel not registered. Use /register first.")
     notify = await update.message.reply_text("🔄 Forwarding history… this may take a while")
     count = 0
-    # Use an ephemeral Telethon client for history to avoid flood-wait issues
-    async with TelegramClient(MemorySession(), API_ID, API_HASH, bot_token=BOT_TOKEN) as history_client:
+
+    # Create a short-lived Telethon client for history
+    history_client = TelegramClient(MemorySession(), API_ID, API_HASH)
+    await history_client.start(bot_token=BOT_TOKEN)
+    try:
+        src_entity = await history_client.get_entity(int(SOURCE_CHAT))
+    except Exception as e:
+        await notify.edit_text(f"❌ Failed to access source channel: {e}")
+        await history_client.disconnect()
+        return
+
+    async for orig in history_client.iter_messages(src_entity, reverse=True):
         try:
-            src_entity = await history_client.get_entity(int(SOURCE_CHAT))
-        except Exception as e:
-            return await notify.edit_text(f"❌ Failed to access source channel: {e}")
+            if orig.photo or orig.video or orig.document:
+                sent = await ctx.bot.copy_message(
+                    chat_id=chat,
+                    from_chat_id=SOURCE_CHAT,
+                    message_id=orig.id
+                )
+                if orig.caption:
+                    new_cap = adjust_caption(orig.caption, chat)
+                    if new_cap != orig.caption:
+                        await ctx.bot.edit_message_caption(
+                            chat_id=sent.chat_id,
+                            message_id=sent.message_id,
+                            caption=new_cap
+                        )
+            elif orig.text:
+                text = adjust_caption(orig.text, chat)
+                await ctx.bot.send_message(chat_id=chat, text=text)
+            count += 1
+        except Exception:
+            continue
+
+    await history_client.disconnect()
+    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")(f"❌ Failed to access source channel: {e}")
         async for orig in history_client.iter_messages(src_entity, reverse=True):
             try:
                 if orig.photo or orig.video or orig.document:
