@@ -48,6 +48,10 @@ _pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))",
 
 # ─── Telethon client init ───────────────────────────
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
+# Will hold the input entity for the source channel to avoid implicit contact lookups
+SOURCE_ENTITY = None
+async def init_telethon():
+tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
 async def init_telethon():
     try:
         await tele_client.start(bot_token=BOT_TOKEN)
@@ -58,7 +62,10 @@ async def init_telethon():
         logger.error(f"Error starting Telethon: {e}")
         return
     try:
-        await tele_client.get_entity(int(SOURCE_CHAT))
+        entity = await tele_client.get_entity(int(SOURCE_CHAT))
+    # also prepare an InputPeer for history fetch
+    global SOURCE_ENTITY
+    SOURCE_ENTITY = await tele_client.get_input_entity(entity)
     except Exception as e:
         logger.error(f"Failed to cache source channel {SOURCE_CHAT}: {e}")
 
