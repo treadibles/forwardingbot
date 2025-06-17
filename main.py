@@ -19,7 +19,7 @@ from telethon.sessions import MemorySession
 # ─── Setup and config ───────────────────────────────
 load_dotenv()
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
-SOURCE_CHAT = os.getenv("SOURCE_CHANNEL")  # source channel ID or @username
+SOURCE_CHAT = os.getenv("SOURCE_CHANNEL")
 API_ID      = int(os.getenv("API_ID"))
 API_HASH    = os.getenv("API_HASH")
 CONFIG_FILE = "config.json"
@@ -39,22 +39,26 @@ inc_cart     = _config.get("inc_cart", {})
 THRESHOLD = 200
 _pattern  = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))", re.IGNORECASE)
 
-# ─── Initialize Telethon ─────────────────────────────
+# ─── Telethon client init ────────────────────────────
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
+
 async def init_telethon():
     await tele_client.start(bot_token=BOT_TOKEN)
     await tele_client.get_entity(int(SOURCE_CHAT))
 
-# ─── Keep-alive server ───────────────────────────────
+# ─── Flask keep-alive server ─────────────────────────
 app = Flask(__name__)
 @app.route("/")
-def ping(): return "OK", 200
+def ping():
+    return "OK", 200
 
 def keep_alive():
     port = int(os.environ.get("PORT", 8080))
-    t = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port))
-    t.daemon = True
-    t.start()
+    thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port)
+    )
+    thread.daemon = True
+    thread.start()
 
 # ─── Caption adjuster ───────────────────────────────
 def adjust_caption(text: str, chat: str) -> str:
@@ -65,14 +69,13 @@ def adjust_caption(text: str, chat: str) -> str:
         new_val = val + inc
         if '.' in orig:
             dec_len = len(orig.split('.')[-1])
-            fmt = f"{{:.{dec_len}f}}"
-            new = fmt.format(new_val)
+            new = f"{new_val:.{dec_len}f}"
         else:
             new = str(int(new_val))
-        return f"{prefix}{new}"  
+        return f"{prefix}{new}"
     return _pattern.sub(repl, text)
 
-# ─── /register ───────────────────────────────────────
+# ─── /register command ──────────────────────────────
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         return await update.message.reply_text("Usage: /register <chat_id_or_username>")
@@ -81,12 +84,50 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         target_chats.append(chat)
         inc_pound[chat] = 200
         inc_cart[chat]  = 15
-        _config.update({"target_chats": target_chats, "inc_pound": inc_pound, "inc_cart": inc_cart})
+        _config.update({
+            "target_chats": target_chats,
+            "inc_pound": inc_pound,
+            "inc_cart": inc_cart,
+        })
         with open(CONFIG_FILE, "w") as f:
             json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Added target channel: {chat}")
 
-# ─── /forward ────────────────────────────────────────
+# ─── /increasepound command ─────────────────────────
+async def increasepound(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) != 2:
+        return await update.message.reply_text("Usage: /increasepound <chat> <amount>")
+    chat, val = ctx.args
+    if chat not in target_chats:
+        return await update.message.reply_text("Channel not registered.")
+    try:
+        amt = float(val)
+    except ValueError:
+        return await update.message.reply_text("Provide a valid number.")
+    inc_pound[chat] = amt
+    _config["inc_pound"] = inc_pound
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+    await update.message.reply_text(f"✅ Pound increment for {chat} set to +{amt}")
+
+# ─── /increasecart command ──────────────────────────
+async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) != 2:
+        return await update.message.reply_text("Usage: /increasecart <chat> <amount>")
+    chat, val = ctx.args
+    if chat not in target_chats:
+        return await update.message.reply_text("Channel not registered.")
+    try:
+        amt = float(val)
+    except ValueError:
+        return await update.message.reply_text("Provide a valid number.")
+    inc_cart[chat] = amt
+    _config["inc_cart"] = inc_cart
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+    await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
+
+# ─── /forward command (history) ─────────────────────
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
@@ -117,9 +158,9 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             count += 1
         except Exception:
             continue
-    await msg.edit_text(f"✅ History forwarding complete: {count} messages sent to {chat}.")
+    await msg.edit_text(f"✅ History forwarded: {count} messages to {chat}.")
 
-# ─── Forward live media groups ──────────────────────
+# ─── Live forward media-group flush ────────────────
 media_buf = {}
 FLUSH_DELAY = 1.0
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
@@ -173,14 +214,14 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 def main():
     asyncio.get_event_loop().run_until_complete(init_telethon())
     keep_alive()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("register", register))
-    app.add_handler(CommandHandler("forward", forward_history))
-    app.add_handler(CommandHandler("increasepound", increasepound))
-    app.add_handler(CommandHandler("increasecart", increasecart))
-    app.add_handler(MessageHandler(filters.ALL, forward_handler))
-    print("Bot is running with history forward support.")
-    app.run_polling()
+    bot = ApplicationBuilder().token(BOT_TOKEN).build()
+    bot.add_handler(CommandHandler("register", register))
+    bot.add_handler(CommandHandler("forward", forward_history))
+    bot.add_handler(CommandHandler("increasepound", increasepound))
+    bot.add_handler(CommandHandler("increasecart", increasecart))
+    bot.add_handler(MessageHandler(filters.ALL, forward_handler))
+    print("Bot is running with history and live forwarding.")
+    bot.run_polling()
 
 if __name__ == "__main__":
     main()
