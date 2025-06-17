@@ -47,6 +47,7 @@ THRESHOLD = 200
 _pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))", re.IGNORECASE)
 
 # ─── Telethon client init ───────────────────────────
+# Initialize Telethon client and session
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
 # Will hold the input entity for the source channel to avoid implicit contact lookups
 SOURCE_ENTITY = None
