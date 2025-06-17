@@ -160,7 +160,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Channel not registered. Use /register first.")
     msg = await update.message.reply_text("🔄 Forwarding history… this may take a while")
     count = 0
-    async for orig in tele_client.iter_messages(SOURCE_CHAT, reverse=True):
+    async for orig in tele_client.iter_messages(SOURCE_ENTITY, reverse=True):
         try:
             if orig.photo or orig.video or orig.document:
                 sent = await ctx.bot.copy_message(
