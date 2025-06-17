@@ -136,24 +136,33 @@ async def init_history_client():
 
 # ─── /forward handler (history) ────────────────────
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Forward all historical messages from the source into the specified target channel,
+    applying per-channel pound/cart increments.
+    Requires an existing logged-in user session for history_client.
+    """
+    # Validate args
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
     chat = ctx.args[0]
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
-    notify = await update.message.reply_text("🔄 Forwarding history… this may take a while")
+
+    notify = await update.message.reply_text("🔄 Forwarding history… please wait")
     count = 0
+
+    # Ensure user session is active
+    if not history_client.is_connected() or not await history_client.is_user_authorized():
+        return await notify.edit_text("❌ History forwarding unavailable: user session not authorized.")
+
+    # Fetch the source channel entity
     try:
-        await history_client.start(bot_token=BOT_TOKEN)
-    except FloodWaitError as e:
-        return await notify.edit_text(f"❌ FloodWait: wait {e.seconds}s then retry.")
+        src_entity = await history_client.get_entity(int(SOURCE_CHAT))
     except Exception as e:
-        return await notify.edit_text(f"❌ History init failed: {e}")
-    try:
-        src = await history_client.get_entity(int(SOURCE_CHAT))
-    except Exception as e:
-        return await notify.edit_text(f"❌ Cannot access source: {e}")
-    async for orig in history_client.iter_messages(src, reverse=True):
+        return await notify.edit_text(f"❌ Cannot access source channel: {e}")
+
+    # Iterate and forward
+    async for orig in history_client.iter_messages(src_entity, reverse=True):
         try:
             if orig.photo or orig.video or orig.document:
                 sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=orig.id)
@@ -162,16 +171,14 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     if new_cap != orig.caption:
                         await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
             elif orig.text:
-                text = adjust_caption(orig.text, chat)
-                await ctx.bot.send_message(chat_id=chat, text=text)
+                new_txt = adjust_caption(orig.text, chat)
+                await ctx.bot.send_message(chat_id=chat, text=new_txt)
             count += 1
-        except:
+        except Exception:
             continue
+
     await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")
 
-# ─── Live media grouping flush ─────────────────────
-media_buf = {}
-FLUSH_DELAY = 1.0
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
     msgs = media_buf.pop(gid, [])
     if not msgs:
