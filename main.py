@@ -157,9 +157,10 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Channel not registered. Use /register first.")
     msg = await update.message.reply_text("🔄 Forwarding history… this may take a while")
     count = 0
-    # Use the cached entity for history iteration
+    # Ensure entity is cached
     if target_entity is None:
         await init_telethon()
+    # Iterate history
     async for orig in tele_client.iter_messages(target_entity, reverse=True):
         try:
             if orig.photo or orig.video or orig.document:
