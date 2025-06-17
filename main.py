@@ -161,7 +161,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         return await notify.edit_text(f"❌ Cannot access source channel: {e}")
 
-    # Collect all media messages
+        # Collect all media messages
     media_msgs = []
     async for orig in history_client.iter_messages(src, reverse=True):
         # Skip text-only posts
@@ -180,7 +180,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 group.append(media_msgs[j])
                 j += 1
             # Compute adjusted caption once
-            orig_caption = group[0].caption or ''
+            orig_caption = group[0].message or ''
             new_caption = adjust_caption(orig_caption, chat) if orig_caption else None
             # Build media list
             media = []
@@ -201,7 +201,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             i = j
         else:
             # Single media message, adjust caption if present
-            orig_caption = msg.caption or ''
+            orig_caption = msg.message or ''
             new_caption = adjust_caption(orig_caption, chat) if orig_caption else None
             try:
                 sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=msg.chat.id, message_id=msg.id)
@@ -211,7 +211,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             i += 1
-    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
+    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
     msgs = media_buf.pop(gid, [])
