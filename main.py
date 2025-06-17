@@ -123,8 +123,16 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
-# ─── Initialize persistent Telethon for history ────
+# ─── Initialize persistent Telethon user client for history ────
+PHONE_NUMBER = os.getenv("PHONE_NUMBER")
 history_client = TelegramClient('history.session', API_ID, API_HASH)
+
+async def init_history_client():
+    """
+    Sign in the user session for history fetching. Prompts for code on first run.
+    """
+    await history_client.start(phone=PHONE_NUMBER)
+
 
 # ─── /forward handler (history) ────────────────────
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
