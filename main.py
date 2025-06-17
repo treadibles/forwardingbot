@@ -3,7 +3,6 @@ import re
 import json
 import asyncio
 import threading
-import logging
 from dotenv import load_dotenv
 from flask import Flask
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -17,11 +16,7 @@ from telegram.ext import (
 from telethon import TelegramClient
 from telethon.sessions import MemorySession
 
-# ─── Setup logging ──────────────────────────────────
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ─── Load env & config ─────────────────────────────
+# ─── Setup and config ───────────────────────────────
 load_dotenv()
 BOT_TOKEN   = os.getenv("BOT_TOKEN")
 SOURCE_CHAT = os.getenv("SOURCE_CHANNEL")  # source channel ID or @username
@@ -35,26 +30,22 @@ try:
 except (FileNotFoundError, json.JSONDecodeError):
     _config = {}
 
-# List of target channels
+# Targets and increments
 target_chats = _config.get("target_chats", [])
-# Per-channel increments
-inc_pound = _config.get("inc_pound", {})
-inc_cart  = _config.get("inc_cart", {})
+inc_pound    = _config.get("inc_pound", {})
+inc_cart     = _config.get("inc_cart", {})
 
-# Threshold divide
+# Threshold and regex
 THRESHOLD = 200
-# Regex match for '/P for' or '/ea'
-_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))", re.IGNORECASE)
+_pattern  = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))", re.IGNORECASE)
 
-# Initialize Telethon (persistent memory session)
+# ─── Initialize Telethon ─────────────────────────────
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
-
 async def init_telethon():
     await tele_client.start(bot_token=BOT_TOKEN)
-    # cache source channel
     await tele_client.get_entity(int(SOURCE_CHAT))
 
-# ─── Keep-alive server ──────────────────────────────
+# ─── Keep-alive server ───────────────────────────────
 app = Flask(__name__)
 @app.route("/")
 def ping(): return "OK", 200
@@ -65,23 +56,23 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# ─── Caption adjuster ──────────────────────────────
+# ─── Caption adjuster ───────────────────────────────
 def adjust_caption(text: str, chat: str) -> str:
     def repl(m):
         prefix, orig = m.group(1), m.group(2)
         val = float(orig)
         inc = inc_pound.get(chat, 200) if val > THRESHOLD else inc_cart.get(chat, 15)
         new_val = val + inc
-        # preserve decimals
         if '.' in orig:
             dec_len = len(orig.split('.')[-1])
-            new = f"{new_val:.{dec_len}f}"
+            fmt = f"{{:.{dec_len}f}}"
+            new = fmt.format(new_val)
         else:
             new = str(int(new_val))
-        return f"{prefix}{new}"
+        return f"{prefix}{new}"  
     return _pattern.sub(repl, text)
 
-# ─── /register ──────────────────────────────────────
+# ─── /register ───────────────────────────────────────
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         return await update.message.reply_text("Usage: /register <chat_id_or_username>")
@@ -90,69 +81,47 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         target_chats.append(chat)
         inc_pound[chat] = 200
         inc_cart[chat]  = 15
-        _config["target_chats"] = target_chats
-        _config["inc_pound"] = inc_pound
-        _config["inc_cart"] = inc_cart
+        _config.update({"target_chats": target_chats, "inc_pound": inc_pound, "inc_cart": inc_cart})
         with open(CONFIG_FILE, "w") as f:
             json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Added target channel: {chat}")
 
-# ─── /list ──────────────────────────────────────────
-async def list_targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("No registered targets.")
-    text = "Registered channels:\n" + "\n".join(target_chats)
-    await update.message.reply_text(text)
-
-# ─── /check to test channel permissions ─────────────
-async def check_channel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        return await update.message.reply_text("Usage: /check <chat_id_or_username>")
+# ─── /forward ────────────────────────────────────────
+async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) != 1:
+        return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
     chat = ctx.args[0]
-    try:
-        info = await ctx.bot.get_chat(chat)
-        await update.message.reply_text(f"✅ Chat found: {info.title or info.id}")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error accessing {chat}: {e}")
-
-# ─── /increasepound ────────────────────────────────
-async def increasepound(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if len(ctx.args) != 2:
-        return await update.message.reply_text("Usage: /increasepound <chat> <amount>")
-    chat, val = ctx.args
     if chat not in target_chats:
-        return await update.message.reply_text("Channel not registered.")
-    try:
-        amt = float(val)
-    except ValueError:
-        return await update.message.reply_text("Provide a valid number.")
-    inc_pound[chat] = amt
-    _config["inc_pound"] = inc_pound
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(_config, f, indent=2)
-    await update.message.reply_text(f"✅ Pound increment for {chat} set to +{amt}")
+        return await update.message.reply_text("Channel not registered. Use /register first.")
+    msg = await update.message.reply_text("🔄 Forwarding history… this may take a while")
+    count = 0
+    async for orig in tele_client.iter_messages(SOURCE_CHAT, reverse=True):
+        try:
+            if orig.photo or orig.video or orig.document:
+                sent = await ctx.bot.copy_message(
+                    chat_id=chat,
+                    from_chat_id=SOURCE_CHAT,
+                    message_id=orig.id
+                )
+                if orig.caption:
+                    new_cap = adjust_caption(orig.caption, chat)
+                    if new_cap != orig.caption:
+                        await ctx.bot.edit_message_caption(
+                            chat_id=sent.chat_id,
+                            message_id=sent.message_id,
+                            caption=new_cap
+                        )
+            elif orig.text:
+                new_txt = adjust_caption(orig.text, chat)
+                await ctx.bot.send_message(chat_id=chat, text=new_txt)
+            count += 1
+        except Exception:
+            continue
+    await msg.edit_text(f"✅ History forwarding complete: {count} messages sent to {chat}.")
 
-# ─── /increasecart ─────────────────────────────────
-async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if len(ctx.args) != 2:
-        return await update.message.reply_text("Usage: /increasecart <chat> <amount>")
-    chat, val = ctx.args
-    if chat not in target_chats:
-        return await update.message.reply_text("Channel not registered.")
-    try:
-        amt = float(val)
-    except ValueError:
-        return await update.message.reply_text("Provide a valid number.")
-    inc_cart[chat] = amt
-    _config["inc_cart"] = inc_cart
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(_config, f, indent=2)
-    await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
-
-# ─── Media-group flush ─────────────────────────────
+# ─── Forward live media groups ──────────────────────
 media_buf = {}
 FLUSH_DELAY = 1.0
-
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
     msgs = media_buf.pop(gid, [])
     if not msgs:
@@ -172,10 +141,10 @@ async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
                 else:
                     media.append(InputMediaDocument(m.document.file_id, caption=cap))
             await ctx.bot.send_media_group(chat_id=chat, media=media)
-        except Exception as e:
-            logger.error(f"Failed media-group to {chat}: {e}")
+        except Exception:
+            continue
 
-# ─── Forward handler ─────────────────────────────────
+# ─── Live forward handler ───────────────────────────
 async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     if str(update.effective_chat.id) != SOURCE_CHAT or not target_chats:
@@ -189,27 +158,29 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         orig = msg.caption or ""
         for chat in target_chats:
             try:
-                copy = await ctx.bot.copy_message(chat_id=chat, from_chat_id=msg.chat.id, message_id=msg.message_id)
+                sent = await ctx.bot.copy_message(
+                    chat_id=chat,
+                    from_chat_id=SOURCE_CHAT,
+                    message_id=msg.message_id
+                )
                 new_cap = adjust_caption(orig, chat)
                 if new_cap != orig:
-                    await ctx.bot.edit_message_caption(chat_id=copy.chat_id, message_id=copy.message_id, caption=new_cap)
-            except Exception as e:
-                logger.error(f"Failed single media to {chat}: {e}")
-        return
+                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
+            except Exception:
+                continue
 
-# ─── Entrypoint ────────────────────────────────────
+# ─── Entrypoint ─────────────────────────────────────
 def main():
     asyncio.get_event_loop().run_until_complete(init_telethon())
     keep_alive()
-    bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    bot.add_handler(CommandHandler("register", register))
-    bot.add_handler(CommandHandler("list", list_targets))
-    bot.add_handler(CommandHandler("check", check_channel))
-    bot.add_handler(CommandHandler("increasepound", increasepound))
-    bot.add_handler(CommandHandler("increasecart", increasecart))
-    bot.add_handler(MessageHandler(filters.ALL, forward_handler))
-    logger.info("Bot is up—handlers registered.")
-    bot.run_polling()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("register", register))
+    app.add_handler(CommandHandler("forward", forward_history))
+    app.add_handler(CommandHandler("increasepound", increasepound))
+    app.add_handler(CommandHandler("increasecart", increasecart))
+    app.add_handler(MessageHandler(filters.ALL, forward_handler))
+    print("Bot is running with history forward support.")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
