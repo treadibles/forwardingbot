@@ -48,14 +48,14 @@ _pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))",
 
 # ─── Telethon client init ───────────────────────────
 tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
-# Will hold the input entity for the source channel to avoid implicit contact lookups
-SOURCE_ENTITY = None
+# Cached source channel entity for history iteration
+target_entity = None
 
 async def init_telethon():
     """
-    Start Telethon client and cache the source channel entity.
-    Handles flood waits gracefully.
+    Start Telethon and cache the source channel entity.
     """
+    global target_entity
     try:
         await tele_client.start(bot_token=BOT_TOKEN)
     except FloodWaitError as e:
@@ -66,15 +66,12 @@ async def init_telethon():
         return
 
     try:
-        # Cache the source channel entity and input entity
-        entity = await tele_client.get_entity(int(SOURCE_CHAT))
-        # Prepare input entity for history iteration
-        global SOURCE_ENTITY
-        SOURCE_ENTITY = await tele_client.get_input_entity(entity)
+        # Cache the channel entity for history iteration
+        target_entity = await tele_client.get_entity(int(SOURCE_CHAT))
     except Exception as e:
-        logger.error(f"Failed to cache source channel {SOURCE_CHAT}: {e}")
+        logger.error(f"Failed to get source channel entity {SOURCE_CHAT}: {e}")
 
-# ─── Flask keep-alive server ───────────────────────── ───────────────────────────────
+# ─── Flask keep-alive server server ───────────────────────── ───────────────────────────────
 app = Flask(__name__)
 @app.route("/")
 def ping():
