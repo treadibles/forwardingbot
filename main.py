@@ -186,8 +186,9 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
             media = []
             for idx, m in enumerate(group):
-                # Download each file to temp
-                path = os.path.join(temp_dir, f"{m.id}")
+                # Download each file to temp, preserving extension
+                ext = get_extension(m) or ''
+                path = os.path.join(temp_dir, f"{m.id}{ext}")
                 await history_client.download_media(m, file=path)
                 cap = new_cap if idx == 0 else None
                 # Choose correct InputMedia type
