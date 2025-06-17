@@ -166,7 +166,8 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return await notify.edit_text(f"❌ Cannot access source channel: {e}")
 
     # Iterate and forward messages
-    async for orig in history_client.iter_messages(src_entity, reverse=True): in history_client.iter_messages(src_entity, reverse=True):
+        # Iterate and forward messages
+    async for orig in history_client.iter_messages(src_entity, reverse=True):
         try:
             if orig.photo or orig.video or orig.document:
                 sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=orig.id)
@@ -180,8 +181,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             count += 1
         except Exception:
             continue
-
-    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")
+    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
     msgs = media_buf.pop(gid, [])
