@@ -1,102 +1,111 @@
-Main
-109
-110
-111
-112
-113
-114
-115
-116
-117
-118
-119
-120
-121
-122
-123
-124
-125
-126
-127
-128
-129
-130
-131
-132
-133
-134
-135
-136
-137
-138
-139
-140
-141
-142
-143
-144
-145
-146
-147
-148
-149
-150
-151
-152
-153
-154
-155
-156
-157
-158
-159
-160
-161
-162
-163
-164
-165
-166
-167
-168
-169
-170
-171
-172
-173
-174
-175
-176
-177
-178
-179
-180
-181
-182
-183
-184
-185
-186
-187
-188
-189
-190
-191
-192
-193
-194
-195
-196
-197
-198
-199
-200
-201
-202
-203
-204
-205
-206
+import os
+import re
+import json
+import asyncio
+import threading
+import logging
+from dotenv import load_dotenv
+from flask import Flask
+from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
+from telethon import TelegramClient
+from telethon.sessions import MemorySession
+from telethon.errors import FloodWaitError
+
+# Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load environment and config
+load_dotenv()
+BOT_TOKEN   = os.getenv("BOT_TOKEN")
+SOURCE_CHAT = os.getenv("SOURCE_CHANNEL")
+API_ID      = int(os.getenv("API_ID"))
+API_HASH    = os.getenv("API_HASH")
+CONFIG_FILE = "config.json"
+
+# Initialize config structures
+target_chats = []
+inc_pound    = {}
+inc_cart     = {}
+try:
+    _config = json.load(open(CONFIG_FILE))
+    target_chats = _config.get("target_chats", [])
+    inc_pound = _config.get("inc_pound", {})
+    inc_cart = _config.get("inc_cart", {})
+except (FileNotFoundError, json.JSONDecodeError):
+    _config = {}
+
+# Threshold and regex
+THRESHOLD = 200
+_pattern  = re.compile(
+    r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))",
+    re.IGNORECASE
+)
+
+# ─── Telethon client for history forwarding ───────────────────────────
+# Uses a persistent SQLite session at 'history.session'
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
+
+tele_client = TelegramClient('history', API_ID, API_HASH)
+
+# Remove init_telethon and related global_entity logic
+# ─── Flask keep-alive server
+app = Flask(__name__)
+@app.route("/")
+def ping():
+    return "OK", 200
+
+def keep_alive():
+    port = int(os.environ.get("PORT", 8080))
+    thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port)
+    )
+    thread.daemon = True
+    thread.start()
+
+# Caption adjustment
+def adjust_caption(text: str, chat: str) -> str:
+    def repl(m):
+        prefix, orig = m.group(1), m.group(2)
+        val = float(orig)
+        inc = inc_pound.get(chat, 200) if val > THRESHOLD else inc_cart.get(chat, 15)
+        new_val = val + inc
+        if '.' in orig:
+            dec_len = len(orig.split('.')[-1])
+            new = f"{new_val:.{dec_len}f}"
+        else:
+            new = str(int(new_val))
+        return f"{prefix}{new}"
+    return _pattern.sub(repl, text)
+
+# Handlers
+async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        return await update.message.reply_text("Usage: /register <chat_id_or_username>")
+    chat = ctx.args[0]
+    if chat not in target_chats:
+        target_chats.append(chat)
+        inc_pound[chat] = 200
+        inc_cart[chat] = 15
+        _config.update({
+            "target_chats": target_chats,
+            "inc_pound": inc_pound,
+            "inc_cart": inc_cart,
+        })
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(_config, f, indent=2)
+    await update.message.reply_text(f"✅ Added target channel: {chat}")
+
+async def increasepound(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) != 2:
         return await update.message.reply_text("Usage: /increasepound <chat> <amount>")
     chat, val = ctx.args
     if chat not in target_chats:
@@ -112,6 +121,22 @@ Main
     await update.message.reply_text(f"✅ Pound increment for {chat} set to +{amt}")
 
 async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) != 2:
+        return await update.message.reply_text("Usage: /increasecart <chat> <amount>")
+    chat, val = ctx.args
+    if chat not in target_chats:
+        return await update.message.reply_text("Channel not registered.")
+    try:
+        amt = float(val)
+    except ValueError:
+        return await update.message.reply_text("Provide a valid number.")
+    inc_cart[chat] = amt
+    _config["inc_cart"] = inc_cart
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+    await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
+
+async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(ctx.args) != 2:
         return await update.message.reply_text("Usage: /increasecart <chat> <amount>")
     chat, val = ctx.args
@@ -185,14 +210,4 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             continue
 
-    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")"❌ Telethon FloodWait: wait {e.seconds}s and try again.")
-        except Exception as e:
-            return await notify.edit_text(f"❌ Error initializing history client: {e}")
-
-    # Fetch source channel entity once
-    try:
-        src_entity = await tele_client.get_entity(int(SOURCE_CHAT))
-    except Exception as e:
-        return await notify.edit_text(f"❌ Failed to access source channel: {e}")
-
-
+        await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")
