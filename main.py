@@ -140,24 +140,61 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
     Forward all historical messages from the source into the specified target channel,
     applying per-channel pound/cart increments.
-    Requires the persistent Telethon client to be initialized at startup.
     """
-    # Validate args
+    # Validate arguments
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
     chat = ctx.args[0]
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
 
+    # Notify user
     notify = await update.message.reply_text("🔄 Forwarding history… this may take a while")
     count = 0
 
-    # Ensure persistent history client is connected
+    # Ensure Telethon client is connected, reuse session
     if not tele_client.is_connected():
         try:
-            await tele_client.start(bot_token=BOT_TOKEN)
-        except FloodWaitError as e:
-            return await notify.edit_text(f"❌ Telethon FloodWait: wait {e.seconds}s and try again.")
+            await tele_client.connect()
+        except Exception:
+            try:
+                await tele_client.start(bot_token=BOT_TOKEN)
+            except FloodWaitError as e:
+                return await notify.edit_text(f"❌ Telethon FloodWait: wait {e.seconds}s and try again.")
+            except Exception as e:
+                return await notify.edit_text(f"❌ Cannot initialize history session: {e}")
+
+    # Fetch source channel entity
+    try:
+        src_entity = await tele_client.get_entity(int(SOURCE_CHAT))
+    except Exception as e:
+        return await notify.edit_text(f"❌ Failed to access source channel: {e}")
+
+    # Iterate and forward messages
+    async for orig in tele_client.iter_messages(src_entity, reverse=True):
+        try:
+            if orig.photo or orig.video or orig.document:
+                sent = await ctx.bot.copy_message(
+                    chat_id=chat,
+                    from_chat_id=SOURCE_CHAT,
+                    message_id=orig.id
+                )
+                if orig.caption:
+                    new_cap = adjust_caption(orig.caption, chat)
+                    if new_cap != orig.caption:
+                        await ctx.bot.edit_message_caption(
+                            chat_id=sent.chat_id,
+                            message_id=sent.message_id,
+                            caption=new_cap
+                        )
+            elif orig.text:
+                new_txt = adjust_caption(orig.text, chat)
+                await ctx.bot.send_message(chat_id=chat, text=new_txt)
+            count += 1
+        except Exception:
+            continue
+
+    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")"❌ Telethon FloodWait: wait {e.seconds}s and try again.")
         except Exception as e:
             return await notify.edit_text(f"❌ Error initializing history client: {e}")
 
