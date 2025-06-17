@@ -224,7 +224,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             count += 1
             i += 1
 
-    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")(f"✅ History forwarded: {count} media posts to {chat}.")(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
     """
     Forward all historical media posts (skipping text-only) from the source into the specified target channel,
     grouping albums/media-groups correctly, applying per-channel pound/cart increments.
