@@ -240,16 +240,19 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
 
 def main():
-    asyncio.get_event_loop().run_until_complete(init_telethon())
+    # Keep-alive server
     keep_alive()
-    bot = ApplicationBuilder().token(BOT_TOKEN).build()
-    bot.add_handler(CommandHandler("register", register))
-    bot.add_handler(CommandHandler("forward", forward_history))
-    bot.add_handler(CommandHandler("increasepound", increasepound))
-    bot.add_handler(CommandHandler("increasecart", increasecart))
-    bot.add_handler(MessageHandler(filters.ALL, forward_handler))
+
+    # Build and run the Telegram bot
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("register", register))
+    app.add_handler(CommandHandler("forward", forward_history))
+    app.add_handler(CommandHandler("increasepound", increasepound))
+    app.add_handler(CommandHandler("increasecart", increasecart))
+    app.add_handler(MessageHandler(filters.ALL, forward_handler))
     logger.info("Bot up and running with history support.")
-    bot.run_polling()
+    app.run_polling()
 
 if __name__ == "__main__":
+    main() "__main__":
     main()
