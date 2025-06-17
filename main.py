@@ -230,6 +230,10 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
     await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
+# buffer for live media-groups
+media_buf = {}
+FLUSH_DELAY = 1.0
+
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
     msgs = media_buf.pop(gid, [])
     if not msgs:
