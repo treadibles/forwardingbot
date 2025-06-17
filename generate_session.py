@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
-import os
-import asyncio
+import os, asyncio
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 
-# ─── Load your .env ─────────────────────────────────
-load_dotenv()  # <-- this pulls in API_ID, API_HASH, etc.
+load_dotenv()
+API_ID      = int(os.getenv("API_ID") or 0)
+API_HASH    = os.getenv("API_HASH") or ""
+PHONE       = os.getenv("PHONE_NUMBER") or ""
 
-API_ID   = int(os.getenv("API_ID") or 0)
-API_HASH = os.getenv("API_HASH") or ""
-
-if not API_ID or not API_HASH:
-    print("❌ ERROR: API_ID or API_HASH not set in .env")
+if not (API_ID and API_HASH and PHONE):
+    print("❌ Make sure API_ID, API_HASH and PHONE_NUMBER are set in .env")
     exit(1)
 
-# ─── Interactive login to produce a StringSession ────
 client = TelegramClient(StringSession(), API_ID, API_HASH)
 
 async def main():
-    print("Logging into your Telegram account…")
-    await client.start()  # prompts phone & code
-    print("\n✅ Logged in successfully!")
-    print("\nCopy this `SESSION_STRING` into your .env:\n")
-    print(client.session.save())  # prints a long session string
+    await client.connect()
+    if not await client.is_user_authorized():
+        print("Requesting login code…")
+        # Try Telegram in-app first, but force SMS if you don’t see it
+        await client.send_code_request(PHONE, force_sms=True)
+        code = input("Enter the SMS code you received: ").strip()
+        await client.sign_in(PHONE, code)
+    print("\n✅ Authorized! Here is your SESSION_STRING:\n")
+    print(client.session.save())
 
 if __name__ == "__main__":
     asyncio.run(main())
