@@ -167,7 +167,27 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         return await notify.edit_text(f"❌ Failed to access source channel: {e}")
 
-    # Iterate and forward
+        # Ensure Telethon is connected (reuse session if available)
+    if not tele_client.is_connected():
+        try:
+            await tele_client.connect()
+        except Exception:
+            # fall back to import authorization if no session exists
+            try:
+                await tele_client.start(bot_token=BOT_TOKEN)
+            except FloodWaitError as e:
+                return await notify.edit_text(f"❌ Telethon FloodWait: wait {e.seconds}s and try again.")
+            except Exception as e:
+                return await notify.edit_text(f"❌ Cannot initialize history session: {e}")
+
+    # Fetch source channel entity
+    try:
+        src_entity = await tele_client.get_entity(int(SOURCE_CHAT))
+    except Exception as e:
+        return await notify.edit_text(f"❌ Failed to access source channel: {e}")
+
+    # Iterate and forward messages
+    async for orig in tele_client.iter_messages(src_entity, reverse=True):
     async for orig in tele_client.iter_messages(src_entity, reverse=True):
         try:
             if orig.photo or orig.video or orig.document:
