@@ -149,43 +149,46 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # If Telethon couldn't initialize (e.g. flood wait), abort
-    if target_entity is None:
-        return await update.message.reply_text(
-            "❌ History forwarding unavailable right now; please try again later."
-        )
+    """
+    Forward all historical messages from the source into the specified target channel,
+    applying per-channel pound/cart increments.
+    """
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
     chat = ctx.args[0]
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
-    msg = await update.message.reply_text("🔄 Forwarding history… this may take a while")
+    notify = await update.message.reply_text("🔄 Forwarding history… this may take a while")
     count = 0
-    if target_entity is None:
-        await init_telethon()
-    async for orig in tele_client.iter_messages(target_entity, reverse=True):
+    # Use an ephemeral Telethon client for history to avoid flood-wait issues
+    async with TelegramClient(MemorySession(), API_ID, API_HASH, bot_token=BOT_TOKEN) as history_client:
         try:
-            if orig.photo or orig.video or orig.document:
-                sent = await ctx.bot.copy_message(
-                    chat_id=chat,
-                    from_chat_id=SOURCE_CHAT,
-                    message_id=orig.id
-                )
-                if orig.caption:
-                    new_cap = adjust_caption(orig.caption, chat)
-                    if new_cap != orig.caption:
-                        await ctx.bot.edit_message_caption(
-                            chat_id=sent.chat_id,
-                            message_id=sent.message_id,
-                            caption=new_cap
-                        )
-            elif orig.text:
-                new_txt = adjust_caption(orig.text, chat)
-                await ctx.bot.send_message(chat_id=chat, text=new_txt)
-            count += 1
-        except Exception:
-            continue
-    await msg.edit_text(f"✅ History forwarded: {count} messages to {chat}.")
+            src_entity = await history_client.get_entity(int(SOURCE_CHAT))
+        except Exception as e:
+            return await notify.edit_text(f"❌ Failed to access source channel: {e}")
+        async for orig in history_client.iter_messages(src_entity, reverse=True):
+            try:
+                if orig.photo or orig.video or orig.document:
+                    sent = await ctx.bot.copy_message(
+                        chat_id=chat,
+                        from_chat_id=SOURCE_CHAT,
+                        message_id=orig.id
+                    )
+                    if orig.caption:
+                        new_cap = adjust_caption(orig.caption, chat)
+                        if new_cap != orig.caption:
+                            await ctx.bot.edit_message_caption(
+                                chat_id=sent.chat_id,
+                                message_id=sent.message_id,
+                                caption=new_cap
+                            )
+                elif orig.text:
+                    text = adjust_caption(orig.text, chat)
+                    await ctx.bot.send_message(chat_id=chat, text=text)
+                count += 1
+            except Exception:
+                continue
+    await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
 media_buf = {}
 FLUSH_DELAY = 1.0
