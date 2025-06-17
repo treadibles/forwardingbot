@@ -133,9 +133,8 @@ history_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 # ─── /forward handler (history) (history) ────────────────────
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Forward all historical messages from the source into the specified target channel,
-    applying per-channel pound/cart increments.
-    Requires an existing user session for history_client.
+    Forward all historical media posts (skipping text-only) from the source into the specified target channel,
+    grouping albums/media-groups correctly, applying per-channel pound/cart increments.
     """
     # Validate arguments
     if len(ctx.args) != 1:
@@ -144,43 +143,74 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
 
-    # Notify user
     notify = await update.message.reply_text("🔄 Forwarding history… please wait")
     count = 0
 
-    # Ensure history_client is connected and authorized
+    # Ensure user session is active
     try:
         if not history_client.is_connected():
             await history_client.connect()
         if not await history_client.is_user_authorized():
-            await history_client.start()  # attempt to reauthorize via session
+            return await notify.edit_text("❌ History forwarding unavailable: user session not authorized.")
     except Exception as e:
         return await notify.edit_text(f"❌ History session error: {e}")
-    if not await history_client.is_user_authorized():
-        return await notify.edit_text("❌ History forwarding unavailable: user session not authorized.")
 
     # Fetch source channel entity
     try:
-        src_entity = await history_client.get_entity(int(SOURCE_CHAT))
+        src = await history_client.get_entity(int(SOURCE_CHAT))
     except Exception as e:
         return await notify.edit_text(f"❌ Cannot access source channel: {e}")
 
-    # Iterate and forward messages
-        # Iterate and forward messages
-    async for orig in history_client.iter_messages(src_entity, reverse=True):
-        try:
-            if orig.photo or orig.video or orig.document:
-                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=orig.id)
-                if orig.caption:
-                    new_cap = adjust_caption(orig.caption, chat)
-                    if new_cap != orig.caption:
-                        await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
-            elif orig.text:
-                new_txt = adjust_caption(orig.text, chat)
-                await ctx.bot.send_message(chat_id=chat, text=new_txt)
-            count += 1
-        except Exception:
-            continue
+    # Collect all media messages
+    media_msgs = []
+    async for orig in history_client.iter_messages(src, reverse=True):
+        # Skip text-only posts
+        if orig.photo or orig.video or orig.document:
+            media_msgs.append(orig)
+    # Process in order, grouping by media_group_id
+    i = 0
+    while i < len(media_msgs):
+        msg = media_msgs[i]
+        group_id = getattr(msg, 'grouped_id', None)
+        if group_id:
+            # Gather all in this group
+            group = []
+            j = i
+            while j < len(media_msgs) and getattr(media_msgs[j], 'grouped_id', None) == group_id:
+                group.append(media_msgs[j])
+                j += 1
+            # Compute adjusted caption once
+            orig_caption = group[0].caption or ''
+            new_caption = adjust_caption(orig_caption, chat) if orig_caption else None
+            # Build media list
+            media = []
+            for idx, m in enumerate(group):
+                cap = new_caption if idx == 0 else None
+                if m.photo:
+                    media.append(InputMediaPhoto(m.photo[-1].file_id, caption=cap))
+                elif m.video:
+                    media.append(InputMediaVideo(m.video.file_id, caption=cap))
+                else:
+                    media.append(InputMediaDocument(m.document.file_id, caption=cap))
+            # Send as album
+            try:
+                await ctx.bot.send_media_group(chat_id=chat, media=media)
+                count += len(media)
+            except Exception:
+                pass
+            i = j
+        else:
+            # Single media message, adjust caption if present
+            orig_caption = msg.caption or ''
+            new_caption = adjust_caption(orig_caption, chat) if orig_caption else None
+            try:
+                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=msg.chat.id, message_id=msg.id)
+                if orig_caption and new_caption != orig_caption:
+                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_caption)
+                count += 1
+            except Exception:
+                pass
+            i += 1
     await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
