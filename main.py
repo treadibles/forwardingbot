@@ -140,32 +140,35 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
     Forward all historical messages from the source into the specified target channel,
     applying per-channel pound/cart increments.
+    Requires the persistent Telethon client to be initialized at startup.
     """
-    # Validate arguments
+    # Validate args
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
     chat = ctx.args[0]
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
 
-    # Notify user
     notify = await update.message.reply_text("🔄 Forwarding history… this may take a while")
     count = 0
 
-    # Create ephemeral Telethon client for history
-    history_client = TelegramClient(MemorySession(), API_ID, API_HASH)
-    await history_client.start(bot_token=BOT_TOKEN)
+    # Ensure persistent history client is connected
+    if not tele_client.is_connected():
+        try:
+            await tele_client.start(bot_token=BOT_TOKEN)
+        except FloodWaitError as e:
+            return await notify.edit_text(f"❌ Telethon FloodWait: wait {e.seconds}s and try again.")
+        except Exception as e:
+            return await notify.edit_text(f"❌ Error initializing history client: {e}")
 
-    # Attempt to fetch source entity
+    # Fetch source channel entity once
     try:
-        src_entity = await history_client.get_entity(int(SOURCE_CHAT))
+        src_entity = await tele_client.get_entity(int(SOURCE_CHAT))
     except Exception as e:
-        await notify.edit_text(f"❌ Failed to access source channel: {e}")
-        await history_client.disconnect()
-        return
+        return await notify.edit_text(f"❌ Failed to access source channel: {e}")
 
-    # Iterate messages
-    async for orig in history_client.iter_messages(src_entity, reverse=True):
+    # Iterate and forward
+    async for orig in tele_client.iter_messages(src_entity, reverse=True):
         try:
             if orig.photo or orig.video or orig.document:
                 sent = await ctx.bot.copy_message(
@@ -182,15 +185,12 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                             caption=new_cap
                         )
             elif orig.text:
-                new_txt = adjust_caption(orig.text, chat)
-                await ctx.bot.send_message(chat_id=chat, text=new_txt)
+                text = adjust_caption(orig.text, chat)
+                await ctx.bot.send_message(chat_id=chat, text=text)
             count += 1
         except Exception:
-            # Skip errors on individual messages
             continue
 
-    # Disconnect and finalize
-    await history_client.disconnect()
     await notify.edit_text(f"✅ History forwarded: {count} messages to {chat}.")
 
 async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
