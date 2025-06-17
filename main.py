@@ -49,27 +49,15 @@ _pattern  = re.compile(
     re.IGNORECASE
 )
 
-# Telethon client
-target_entity = None
-tele_client = TelegramClient(MemorySession(), API_ID, API_HASH)
+# ─── Telethon client for history forwarding ───────────────────────────
+# Uses a persistent SQLite session at 'history.session'
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 
-async def init_telethon():
-    global target_entity
-    try:
-        await tele_client.start(bot_token=BOT_TOKEN)
-    except FloodWaitError as e:
-        logger.error(f"Telethon FloodWait: wait {e.seconds}s; skipping init.")
-        return
-    except Exception as e:
-        logger.error(f"Error starting Telethon: {e}")
-        return
+tele_client = TelegramClient('history', API_ID, API_HASH)
 
-    try:
-        target_entity = await tele_client.get_entity(int(SOURCE_CHAT))
-    except Exception as e:
-        logger.error(f"Failed to get source channel entity {SOURCE_CHAT}: {e}")
-
-# Flask keep-alive
+# Remove init_telethon and related global_entity logic
+# ─── Flask keep-alive server
 app = Flask(__name__)
 @app.route("/")
 def ping():
