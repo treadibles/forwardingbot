@@ -45,7 +45,11 @@ except:
 # ─── Constants and regex ───────────────────────────
 THRESHOLD = 200
 # Match a number (with optional $) immediately before a slash and any non-space, then a space and “for”
-_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/\S*\s+for)", re.IGNORECASE)
+# NEW: match “/p for” or “/ea for”
+_pattern = re.compile(
+    r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]|[Ee][Aa])\s+for)",
+    re.IGNORECASE
+)
 
 # ─── Flask keep-alive app ──────────────────────────
 webapp = Flask(__name__)
