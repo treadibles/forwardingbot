@@ -275,6 +275,7 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # Handle single media items (photo, video, document)
     if msg.photo or msg.video or msg.document:
+        orig_caption = msg.caption or ""
         for chat in target_chats:
             try:
                 sent = await ctx.bot.copy_message(
@@ -282,10 +283,10 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     from_chat_id  = msg.chat.id,
                     message_id    = msg.message_id,
                 )
-                # Adjust caption based on the copied message
-                if sent.caption:
-                    new_cap = adjust_caption(sent.caption, chat)
-                    if new_cap != sent.caption:
+                # Always adjust using the original caption
+                if orig_caption:
+                    new_cap = adjust_caption(orig_caption, chat)
+                    if new_cap != orig_caption:
                         await ctx.bot.edit_message_caption(
                             chat_id    = sent.chat_id,
                             message_id = sent.message_id,
