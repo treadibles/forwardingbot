@@ -44,12 +44,7 @@ except:
 
 # ─── Constants and regex ───────────────────────────
 THRESHOLD = 200
-# Match a number (with optional $) immediately before a slash and any non-space, then a space and “for”
-# NEW: match “/p for” or “/ea for”
-_pattern = re.compile(
-    r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]|[Ee][Aa])\s+for)",
-    re.IGNORECASE
-)
+_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]\s*for|[Ee][Aa]))", re.IGNORECASE)
 
 # ─── Flask keep-alive app ──────────────────────────
 webapp = Flask(__name__)
@@ -278,9 +273,8 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Handle single media items
+        # Handle single media items (photo, video, document)
     if msg.photo or msg.video or msg.document:
-        orig = msg.caption or ""
         for chat in target_chats:
             try:
                 sent = await ctx.bot.copy_message(
@@ -288,18 +282,20 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     from_chat_id  = msg.chat.id,
                     message_id    = msg.message_id,
                 )
-                new_cap = adjust_caption(orig, chat)
-                if new_cap != orig:
-                    await ctx.bot.edit_message_caption(
-                        chat_id    = sent.chat_id,
-                        message_id = sent.message_id,
-                        caption    = new_cap
-                    )
+                # Adjust caption based on the copied message
+                if sent.caption:
+                    new_cap = adjust_caption(sent.caption, chat)
+                    if new_cap != sent.caption:
+                        await ctx.bot.edit_message_caption(
+                            chat_id    = sent.chat_id,
+                            message_id = sent.message_id,
+                            caption    = new_cap
+                        )
             except Exception:
                 continue
         return
 
-    # Handle text-only pricing posts (cart or pound)
+    # Handle text-only pricing posts (cart or pound) (cart or pound)
     if msg.text:
         # Only forward if text contains a price slash pattern
         if _pattern.search(msg.text):
