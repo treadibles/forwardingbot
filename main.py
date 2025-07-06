@@ -44,7 +44,7 @@ except:
 
 # ─── Constants and regex ───────────────────────────
 THRESHOLD = 200
-_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=\s*/\s*(?:[Pp]\s+for|[Ee][Aa]))", re.IGNORECASE)
+_pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]\s*for|[Ee][Aa]))", re.IGNORECASE)
 
 # ─── Flask keep-alive app ──────────────────────────
 webapp = Flask(__name__)
@@ -259,13 +259,55 @@ async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── Live forward handler ───────────────────────────
 async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
+    # Only handle messages from the source channel
     if str(update.effective_chat.id) != SOURCE_CHAT or not target_chats:
         return
+
+    # Handle media groups
     if msg.media_group_id:
         media_buf.setdefault(msg.media_group_id, []).append(msg)
         loop = asyncio.get_event_loop()
-        loop.call_later(FLUSH_DELAY, lambda: asyncio.create_task(flush_media_group(msg.media_group_id, ctx)))
+        loop.call_later(
+            FLUSH_DELAY,
+            lambda: asyncio.create_task(flush_media_group(msg.media_group_id, ctx))
+        )
         return
+
+    # Handle single media items
+    if msg.photo or msg.video or msg.document:
+        orig = msg.caption or ""
+        for chat in target_chats:
+            try:
+                sent = await ctx.bot.copy_message(
+                    chat_id       = chat,
+                    from_chat_id  = msg.chat.id,
+                    message_id    = msg.message_id,
+                )
+                new_cap = adjust_caption(orig, chat)
+                if new_cap != orig:
+                    await ctx.bot.edit_message_caption(
+                        chat_id    = sent.chat_id,
+                        message_id = sent.message_id,
+                        caption    = new_cap
+                    )
+            except Exception:
+                continue
+        return
+
+    # Handle text-only pricing posts (cart or pound)
+    if msg.text:
+        # Only forward if text contains a price slash pattern
+        if _pattern.search(msg.text):
+            for chat in target_chats:
+                new_txt = adjust_caption(msg.text, chat)
+                try:
+                    await ctx.bot.send_message(chat_id=chat, text=new_txt)
+                except Exception:
+                    continue
+        return
+
+    # Otherwise, skip text-only posts
+    return
     if msg.photo or msg.video or msg.document:
         orig = msg.caption or ""
         for chat in target_chats:
