@@ -123,6 +123,49 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
+# ─── /post: forward EXACT text to all targets ─────────────────────
+async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not target_chats:
+        return await update.message.reply_text("No targets yet. Use /register <chat_id_or_username> first.")
+
+    text = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text if update.message.reply_to_message and update.message.reply_to_message.text else ""
+    )
+    if not text:
+        return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
+
+    ok, fail = 0, 0
+    for chat in target_chats:
+        try:
+            await ctx.bot.send_message(chat_id=chat, text=text)
+            ok += 1
+        except Exception:
+            fail += 1
+            logger.exception(f"/post failed for {chat}")
+    return await update.message.reply_text(f"📣 Sent to {ok} targets" + (f", {fail} failed" if fail else ""))
+
+# ─── /postadj: forward with price adjustments ──────────────────────
+async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not target_chats:
+        return await update.message.reply_text("No targets yet. Use /register <chat_id_or_username> first.")
+
+    base = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text if update.message.reply_to_message and update.message.reply_to_message.text else ""
+    )
+    if not base:
+        return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
+
+    ok, fail = 0, 0
+    for chat in target_chats:
+        try:
+            adj = adjust_caption(base, chat)
+            await ctx.bot.send_message(chat_id=chat, text=adj)
+            ok += 1
+        except Exception:
+            fail += 1
+            logger.exception(f"/postadj failed for {chat}")
+    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else ""))
+
 # ─── Initialize persistent Telethon user client for history ────
 # Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
 SESSION_STRING = os.getenv("SESSION_STRING")
