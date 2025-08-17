@@ -166,6 +166,9 @@ async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"/postadj failed for {chat}")
     return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else ""))
 
+async def targets(update, ctx):
+    await update.message.reply_text("Targets:\n" + "\n".join(map(str, target_chats)) or "None")
+
 # ─── Initialize persistent Telethon user client for history ────
 # Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
 SESSION_STRING = os.getenv("SESSION_STRING")
@@ -368,6 +371,8 @@ def main():
     application.add_handler(CommandHandler("increasepound", increasepound))
     application.add_handler(CommandHandler("increasecart", increasecart))
     application.add_handler(MessageHandler(filters.ALL, forward_handler))
+    application.add_handler(CommandHandler("post", post))
+    application.add_handler(CommandHandler("postadj", postadj))
     logger.info("Bot up and entering polling loop.")
     application.run_polling()
 
