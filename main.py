@@ -370,9 +370,9 @@ def main():
     application.add_handler(CommandHandler("forward", forward_history))
     application.add_handler(CommandHandler("increasepound", increasepound))
     application.add_handler(CommandHandler("increasecart", increasecart))
-    application.add_handler(MessageHandler(filters.ALL, forward_handler))
     application.add_handler(CommandHandler("post", post))
     application.add_handler(CommandHandler("postadj", postadj))
+    application.add_handler(MessageHandler(filters.ALL, forward_handler), group=1)
     logger.info("Bot up and entering polling loop.")
     application.run_polling()
 
