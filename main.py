@@ -34,11 +34,13 @@ CONFIG_FILE = "config.json"
 target_chats = []
 inc_pound    = {}
 inc_cart     = {}
+text_targets = []
 try:
     _config = json.load(open(CONFIG_FILE))
     target_chats = _config.get("target_chats", [])
     inc_pound = _config.get("inc_pound", {})
     inc_cart = _config.get("inc_cart", {})
+    text_targets = _config.get("text_targets", [])
 except:
     _config = {}
 
@@ -58,39 +60,40 @@ def keep_alive():
     thread.daemon = True
     thread.start()
 
-# ─── Helpers for target parsing ───────────────────────────────────
-def _split_targets_and_text(args, replied_text):
-    """
-    args: list from ctx.args
-    replied_text: text from replied message (or None)
-    Returns: (targets_list, text_to_send, error_msg_or_None)
-    """
-    if not args:
-        return [], "", "Usage: /post <target or target1,target2> <text>\n(Or reply to a text and use /post <target(s)>)"
+# ─── /settexttargets: store static text-only destinations ─────────
+async def settexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        return await update.message.reply_text("Usage: /settexttargets <target1,target2,...>\nExample: /settexttargets -100111,-100222,@third")
 
-    # first token is the target spec
-    target_spec = args[0]
-    targets = [t.strip() for t in target_spec.split(",") if t.strip()]
-    # remaining args form the text (if not replying)
-    text = " ".join(args[1:]).strip()
-
-    # if no inline text, try replied text
-    if not text and replied_text:
-        text = replied_text.strip()
-
-    if not text:
-        return [], "", "No text provided. Add text after the target(s) or reply to a message."
-
-    # validate the targets exist in your registered list
-    unknown = [t for t in targets if t not in target_chats]
+    # parse comma-separated targets
+    proposed = [t.strip() for t in " ".join(ctx.args).split(",") if t.strip()]
+    # ensure they are registered first (so we don't store typos)
+    unknown = [t for t in proposed if t not in target_chats]
     if unknown:
-        return [], "", "Unknown target(s): " + ", ".join(unknown) + "\nUse /register <chat> first or /targets to view."
+        return await update.message.reply_text("❌ Unknown/Unregistered target(s): " + ", ".join(unknown) +
+                                              "\nUse /register <chat> first or /targets to view registered ones.")
 
-    return targets, text, None
+    global text_targets
+    text_targets = proposed
+    _config["text_targets"] = text_targets
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+    return await update.message.reply_text("✅ text_targets set:\n" + "\n".join(text_targets))
 
-# (optional) quick inspector; add handler if you want
-async def targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Targets:\n" + ("\n".join(map(str, target_chats)) if target_chats else "None"))
+# ─── /gettexttargets: show current list ────────────────────────────
+async def gettexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not text_targets:
+        return await update.message.reply_text("text_targets: (none set)")
+    return await update.message.reply_text("text_targets:\n" + "\n".join(text_targets))
+
+# ─── /cleartexttargets: clear list ─────────────────────────────────
+async def cleartexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global text_targets
+    text_targets = []
+    _config["text_targets"] = text_targets
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+    return await update.message.reply_text("✅ text_targets cleared.")
 
 # ─── Caption adjustment utility ────────────────────
 def adjust_caption(text: str, chat: str) -> str:
@@ -157,56 +160,53 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
-# ─── /post: send EXACT text to specified target(s) only ───────────
+# ─── /post: send EXACT text only to text_targets ───────────────────
 async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("No targets registered. Use /register <chat_id_or_username> first.")
+    if not text_targets:
+        return await update.message.reply_text(
+            "No text_targets set. Use /settexttargets <t1,t2,...> first.\n"
+            "Tip: /targets shows registered destinations."
+        )
 
-    replied_text = (update.message.reply_to_message.text
-                    if (update.message.reply_to_message and update.message.reply_to_message.text)
-                    else "")
-    targets, text, err = _split_targets_and_text(ctx.args, replied_text)
-    if err:
-        return await update.message.reply_text(err)
+    # take text from args or replied message
+    text = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text if (update.message.reply_to_message and update.message.reply_to_message.text) else ""
+    )
+    if not text:
+        return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
 
     ok, fail = 0, 0
-    for chat in targets:
+    for chat in text_targets:
         try:
             await ctx.bot.send_message(chat_id=chat, text=text)
             ok += 1
         except Exception as e:
             fail += 1
             logger.exception(f"/post failed for {chat}: {e}")
+    return await update.message.reply_text(f"📣 Sent to {ok} text_targets" + (f", {fail} failed" if fail else ""))
 
-    return await update.message.reply_text(
-        f"📣 Sent to {ok} target(s)" + (f", {fail} failed" if fail else "")
-    )
-
-# ─── /postadj: send text with price adjustments to specified targets ─
+# ─── /postadj: send adjusted text only to text_targets ─────────────
 async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("No targets registered. Use /register <chat_id_or_username> first.")
+    if not text_targets:
+        return await update.message.reply_text(
+            "No text_targets set. Use /settexttargets <t1,t2,...> first."
+        )
 
-    replied_text = (update.message.reply_to_message.text
-                    if (update.message.reply_to_message and update.message.reply_to_message.text)
-                    else "")
-    targets, base, err = _split_targets_and_text(ctx.args, replied_text)
-    if err:
-        return await update.message.reply_text(err)
+    base = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text if (update.message.reply_to_message and update.message.reply_to_message.text) else ""
+    )
+    if not base:
+        return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
 
     ok, fail = 0, 0
-    for chat in targets:
+    for chat in text_targets:
         try:
-            adj = adjust_caption(base, chat)
-            await ctx.bot.send_message(chat_id=chat, text=adj)
+            await ctx.bot.send_message(chat_id=chat, text=adjust_caption(base, chat))
             ok += 1
         except Exception as e:
             fail += 1
             logger.exception(f"/postadj failed for {chat}: {e}")
-
-    return await update.message.reply_text(
-        f"📣 Sent (adjusted) to {ok} target(s)" + (f", {fail} failed" if fail else "")
-    )
+    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} text_targets" + (f", {fail} failed" if fail else ""))
 
 # ─── Initialize persistent Telethon user client for history ────
 # Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
@@ -411,7 +411,9 @@ def main():
     application.add_handler(CommandHandler("increasecart", increasecart))
     application.add_handler(CommandHandler("post", post))
     application.add_handler(CommandHandler("postadj", postadj))
-    application.add_handler(CommandHandler("targets", targets))
+    application.add_handler(CommandHandler("settexttargets", settexttargets))
+    application.add_handler(CommandHandler("gettexttargets", gettexttargets))
+    application.add_handler(CommandHandler("cleartexttargets", cleartexttargets))
     application.add_handler(MessageHandler(filters.ALL, forward_handler), group=1)
     logger.info("Bot up and entering polling loop.")
     application.run_polling()
