@@ -58,6 +58,40 @@ def keep_alive():
     thread.daemon = True
     thread.start()
 
+# ─── Helpers for target parsing ───────────────────────────────────
+def _split_targets_and_text(args, replied_text):
+    """
+    args: list from ctx.args
+    replied_text: text from replied message (or None)
+    Returns: (targets_list, text_to_send, error_msg_or_None)
+    """
+    if not args:
+        return [], "", "Usage: /post <target or target1,target2> <text>\n(Or reply to a text and use /post <target(s)>)"
+
+    # first token is the target spec
+    target_spec = args[0]
+    targets = [t.strip() for t in target_spec.split(",") if t.strip()]
+    # remaining args form the text (if not replying)
+    text = " ".join(args[1:]).strip()
+
+    # if no inline text, try replied text
+    if not text and replied_text:
+        text = replied_text.strip()
+
+    if not text:
+        return [], "", "No text provided. Add text after the target(s) or reply to a message."
+
+    # validate the targets exist in your registered list
+    unknown = [t for t in targets if t not in target_chats]
+    if unknown:
+        return [], "", "Unknown target(s): " + ", ".join(unknown) + "\nUse /register <chat> first or /targets to view."
+
+    return targets, text, None
+
+# (optional) quick inspector; add handler if you want
+async def targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Targets:\n" + ("\n".join(map(str, target_chats)) if target_chats else "None"))
+
 # ─── Caption adjustment utility ────────────────────
 def adjust_caption(text: str, chat: str) -> str:
     def repl(m):
@@ -123,51 +157,56 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
-# ─── /post: forward EXACT text to all targets ─────────────────────
+# ─── /post: send EXACT text to specified target(s) only ───────────
 async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not target_chats:
-        return await update.message.reply_text("No targets yet. Use /register <chat_id_or_username> first.")
+        return await update.message.reply_text("No targets registered. Use /register <chat_id_or_username> first.")
 
-    text = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text if update.message.reply_to_message and update.message.reply_to_message.text else ""
-    )
-    if not text:
-        return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
+    replied_text = (update.message.reply_to_message.text
+                    if (update.message.reply_to_message and update.message.reply_to_message.text)
+                    else "")
+    targets, text, err = _split_targets_and_text(ctx.args, replied_text)
+    if err:
+        return await update.message.reply_text(err)
 
     ok, fail = 0, 0
-    for chat in target_chats:
+    for chat in targets:
         try:
             await ctx.bot.send_message(chat_id=chat, text=text)
             ok += 1
-        except Exception:
+        except Exception as e:
             fail += 1
-            logger.exception(f"/post failed for {chat}")
-    return await update.message.reply_text(f"📣 Sent to {ok} targets" + (f", {fail} failed" if fail else ""))
+            logger.exception(f"/post failed for {chat}: {e}")
 
-# ─── /postadj: forward with price adjustments ──────────────────────
+    return await update.message.reply_text(
+        f"📣 Sent to {ok} target(s)" + (f", {fail} failed" if fail else "")
+    )
+
+# ─── /postadj: send text with price adjustments to specified targets ─
 async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not target_chats:
-        return await update.message.reply_text("No targets yet. Use /register <chat_id_or_username> first.")
+        return await update.message.reply_text("No targets registered. Use /register <chat_id_or_username> first.")
 
-    base = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text if update.message.reply_to_message and update.message.reply_to_message.text else ""
-    )
-    if not base:
-        return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
+    replied_text = (update.message.reply_to_message.text
+                    if (update.message.reply_to_message and update.message.reply_to_message.text)
+                    else "")
+    targets, base, err = _split_targets_and_text(ctx.args, replied_text)
+    if err:
+        return await update.message.reply_text(err)
 
     ok, fail = 0, 0
-    for chat in target_chats:
+    for chat in targets:
         try:
             adj = adjust_caption(base, chat)
             await ctx.bot.send_message(chat_id=chat, text=adj)
             ok += 1
-        except Exception:
+        except Exception as e:
             fail += 1
-            logger.exception(f"/postadj failed for {chat}")
-    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else ""))
+            logger.exception(f"/postadj failed for {chat}: {e}")
 
-async def targets(update, ctx):
-    await update.message.reply_text("Targets:\n" + "\n".join(map(str, target_chats)) or "None")
+    return await update.message.reply_text(
+        f"📣 Sent (adjusted) to {ok} target(s)" + (f", {fail} failed" if fail else "")
+    )
 
 # ─── Initialize persistent Telethon user client for history ────
 # Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
@@ -372,6 +411,7 @@ def main():
     application.add_handler(CommandHandler("increasecart", increasecart))
     application.add_handler(CommandHandler("post", post))
     application.add_handler(CommandHandler("postadj", postadj))
+    application.add_handler(CommandHandler("targets", targets))
     application.add_handler(MessageHandler(filters.ALL, forward_handler), group=1)
     logger.info("Bot up and entering polling loop.")
     application.run_polling()
