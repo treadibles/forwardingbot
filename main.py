@@ -4,6 +4,7 @@ import json
 import asyncio
 import threading
 import logging
+from telethon.tl.types import PeerChannel, PeerChat
 from dotenv import load_dotenv
 from flask import Flask
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -78,6 +79,23 @@ def adjust_caption(text: str, chat: str) -> str:
             new = str(int(new_val))
         return f"{prefix}{new}"
     return _pattern.sub(repl, text)
+
+import unicodedata, string
+_WS = re.compile(r"\s+")
+def _norm(s: str) -> str:
+    """Normalize for safe prefix/contains checks."""
+    if not s: return ""
+    s = unicodedata.normalize("NFKC", s).lower()
+    s = _WS.sub(" ", s).strip()
+    return s
+
+def _first_non_empty_caption(msgs):
+    """Return the first non-empty caption/message string within a media group."""
+    for x in msgs:
+        cap = (x.message or x.caption or "").strip()
+        if cap:
+            return cap
+    return ""
 
 # Detect plain URLs, t.me links, and Markdown-style [text](url)
 URL_PATTERN = re.compile(
@@ -308,6 +326,21 @@ def _extract_phrase_before_sold_out(text: str) -> str:
         return ""
     return text[:i].strip()
 
+def _resolve_target(chat: str | int):
+    """
+    Accepts -100... channel IDs, -... basic chat IDs, or @username/str.
+    Returns a value Telethon can resolve via get_entity(...).
+    """
+    s = str(chat)
+    if s.lstrip("-").isdigit():
+        if s.startswith("-100"):      # channels/supergroups
+            return PeerChannel(int(s[4:]))
+        elif s.startswith("-"):       # basic groups (rare)
+            return PeerChat(int(s[1:]))
+        else:
+            return int(s)             # plain user ID (unlikely here)
+    return chat                        # @username or name
+
 async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
     """
     Find the most recent album in album_index[chat] whose caption STARTS with `phrase`
@@ -323,7 +356,7 @@ async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phra
     for idx in range(len(album_index[cid]) - 1, -1, -1):
         rec = album_index[cid][idx]
         cap = (rec.get("caption") or "").strip()
-        if cap.lower().startswith(phrase_norm) and rec.get("message_ids"):
+        if _norm(cap).startswith(_norm(phrase)) and rec.get("message_ids"):
             # try to delete every message in the album
             deleted_any = False
             for mid in rec["message_ids"]:
@@ -338,7 +371,7 @@ async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phra
             return deleted_any
     return False
 
-HISTORY_SCAN_LIMIT = 600  # a little deeper, adjust if needed
+HISTORY_SCAN_LIMIT = 800  # a little deeper, adjust if needed
 
 async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
     """
@@ -359,7 +392,7 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
 
     # Resolve target entity
     try:
-        tgt = await history_client.get_entity(int(chat)) if str(chat).lstrip("-").isdigit() else await history_client.get_entity(chat)
+       tgt = await history_client.get_entity(_resolve_target(chat))
     except Exception as e:
         logger.exception(f"Cannot access target entity {chat}: {e}")
         return False
@@ -384,16 +417,10 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
         arr.sort(key=lambda x: x.date)  # chronological inside group
 
         # Pick the first NON-EMPTY caption across the group (many users caption the 2nd+ item)
-        cap = ""
-        for x in arr:
-            cap = (x.message or x.caption or "").strip()
-            if cap:
-                break
-
-        if not cap:
+        first_cap = _first_non_empty_caption(arr)
+        if not first_cap:
             continue
-
-        if cap.lower().startswith(phrase_norm):
+        if _norm(first_cap).startswith(_norm(phrase)):
             # Delete all message ids in this group (or the single one)
             mids = [x.id for x in arr]
             deleted_any = False
@@ -550,6 +577,47 @@ async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
     return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else "") + note)
 
+async def diag_soldout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if len(ctx.args) < 2:
+        return await update.message.reply_text("Usage: /diag_soldout <chat_id_or_username> <phrase...>")
+    chat = ctx.args[0]
+    phrase = " ".join(ctx.args[1:])
+
+    try:
+        if not history_client.is_connected():
+            await history_client.connect()
+        if not await history_client.is_user_authorized():
+            return await update.message.reply_text("Telethon user is not authorized.")
+    except Exception as e:
+        return await update.message.reply_text(f"Telethon connect error: {e}")
+
+    try:
+        tgt = await history_client.get_entity(_resolve_target(chat))
+    except Exception as e:
+        return await update.message.reply_text(f"Cannot access target: {e}")
+
+    groups = {}
+    async for m in history_client.iter_messages(tgt, limit=200):
+        if not (m.photo or m.video or m.document):
+            continue
+        gid = m.grouped_id
+        key = (gid,) if gid else ("single", m.id)
+        groups.setdefault(key, []).append(m)
+
+    lines = [f"Diag phrase: {phrase}"]
+    shown = 0
+    for key, arr in sorted(groups.items(), key=lambda kv: max(x.date for x in kv[1]), reverse=True):
+        arr.sort(key=lambda x: x.date)
+        cap = _first_non_empty_caption(arr)
+        if not cap: continue
+        mark = "MATCH" if _norm(cap).startswith(_norm(phrase)) else "no"
+        kind = "album" if key[0] != "single" else "single"
+        lines.append(f"- {kind}: {_norm(cap)[:90]}{'...' if len(cap)>90 else ''} -> {mark}")
+        shown += 1
+        if shown >= 12: break
+
+    await update.message.reply_text("\n".join(lines) if shown else "No recent media found.")
+
 # ─── Entrypoint ─────────────────────────────────────
 def main():
     keep_alive()
@@ -562,6 +630,7 @@ def main():
     application.add_handler(CommandHandler("postadj", postadj))
     application.add_handler(CommandHandler("targets", targets))           
     application.add_handler(MessageHandler(filters.ALL, forward_handler), group=1)
+    application.add_handler(CommandHandler("diag_soldout", diag_soldout))
     logger.info("Bot up and entering polling loop.")
     application.run_polling()
 
