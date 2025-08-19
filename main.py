@@ -50,6 +50,7 @@ except:
 # ─── Constants and regex ───────────────────────────
 THRESHOLD = 200
 _pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]\s*for|[Ee][Aa]))", re.IGNORECASE)
+_pattern_takefor = re.compile(r'(?i)(\btake\s*for\s*)(\$?)(\d+(?:\.\d+)?)\b')
 
 # ─── Flask keep-alive app ──────────────────────────
 webapp = Flask(__name__)
@@ -142,89 +143,6 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with open(CONFIG_FILE, "w") as f:
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
-
-# ─── /post: EXACT text to all registered targets; block hyperlinks; delete-on-sold-out ───
-async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
-
-    # text from args or from a replied message
-    text = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text
-        if (update.message.reply_to_message and update.message.reply_to_message.text)
-        else ""
-    )
-    if not text:
-        return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
-
-    # hyperlink guard
-    if contains_link(text, update):
-        return await update.message.reply_text("⚠️ Link detected. For safety, send this update manually to the channels.")
-
-    # delete matching album if 'sold out' present
-    phrase = _extract_phrase_before_sold_out(text)
-    deleted_in = []
-    if phrase:
-        for chat in target_chats:
-            try:
-                ok = await _delete_matching_album(ctx, chat, phrase)
-                if not ok:
-                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
-                if ok:
-                    deleted_in.append(str(chat))
-            except Exception as e:
-                logger.exception(f"Album delete attempt failed for {chat}: {e}")
-
-    # broadcast text to all targets
-    ok, fail = 0, 0
-    for chat in target_chats:
-        try:
-            await ctx.bot.send_message(chat_id=chat, text=text)
-            ok += 1
-        except Exception as e:
-            fail += 1
-            logger.exception(f"/post failed for {chat}: {e}")
-
-    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
-    return await update.message.reply_text(f"📣 Sent to {ok} targets" + (f", {fail} failed" if fail else "") + note)
-
-# ─── /postadj: adjusted text to all registered targets; same delete logic (links allowed) ───
-async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
-
-    base = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text
-        if (update.message.reply_to_message and update.message.reply_to_message.text)
-        else ""
-    )
-    if not base:
-        return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
-
-    phrase = _extract_phrase_before_sold_out(base)
-    deleted_in = []
-    if phrase:
-        for chat in target_chats:
-            try:
-                ok = await _delete_matching_album(ctx, chat, phrase)
-                if not ok:
-                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
-                if ok:
-                    deleted_in.append(str(chat))
-            except Exception as e:
-                logger.exception(f"Album delete attempt failed for {chat}: {e}")
-
-    ok, fail = 0, 0
-    for chat in target_chats:
-        try:
-            await ctx.bot.send_message(chat_id=chat, text=adjust_caption(base, chat))
-            ok += 1
-        except Exception as e:
-            fail += 1
-            logger.exception(f"/postadj failed for {chat}: {e}")
-
-    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
-    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else "") + note)
 
 # ─── Initialize persistent Telethon user client for history ────
 # Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
@@ -420,6 +338,61 @@ async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phra
             return deleted_any
     return False
 
+HISTORY_SCAN_LIMIT = 400  # how many recent messages to search per target
+
+async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
+    """
+    If we didn't find an album in our index for this chat/phrase, search the channel history
+    (recent messages) for the most-recent media-group (album) whose *first caption* starts
+    with `phrase` (case-insensitive). If found, delete the whole album and return True.
+    """
+    # Ensure Telethon user client is connected & authorized
+    try:
+        if not history_client.is_connected():
+            await history_client.connect()
+        if not await history_client.is_user_authorized():
+            logger.warning("Telethon history_client not authorized; cannot fallback search.")
+            return False
+    except Exception as e:
+        logger.exception(f"Telethon connect/authorize failed: {e}")
+        return False
+
+    # Resolve target entity (accepts numeric ID or @username)
+    try:
+        tgt = await history_client.get_entity(int(chat)) if str(chat).lstrip("-").isdigit() else await history_client.get_entity(chat)
+    except Exception as e:
+        logger.exception(f"Cannot access target entity {chat}: {e}")
+        return False
+
+    # Collect recent media messages and group by grouped_id (albums only)
+    groups = {}
+    async for m in history_client.iter_messages(tgt, limit=HISTORY_SCAN_LIMIT):
+        if not (m.photo or m.video or m.document):
+            continue
+        gid = m.grouped_id
+        if not gid:
+            continue  # skip single-media posts (you only want albums)
+        groups.setdefault(gid, []).append(m)
+
+    phrase_norm = (phrase or "").strip().lower()
+    if not phrase_norm or not groups:
+        return False
+
+    # Search newest albums first; compare against the first message's caption
+    for gid, arr in sorted(groups.items(), key=lambda kv: max(x.date for x in kv[1]), reverse=True):
+        arr.sort(key=lambda x: x.date)  # chronological
+        first_cap = (arr[0].message or arr[0].caption or "")
+        if (first_cap or "").strip().lower().startswith(phrase_norm):
+            deleted_any = False
+            for mid in [x.id for x in arr]:
+                try:
+                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                    deleted_any = True
+                except Exception as e:
+                    logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
+            return deleted_any
+    return False
+
 # ─── Live forward handler ───────────────────────────
 async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
@@ -479,6 +452,89 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
             except:
                 continue
+            
+# ─── /post: EXACT text to all registered targets; block hyperlinks; delete-on-sold-out ───
+async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not target_chats:
+        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
+
+    # text from args or from a replied message
+    text = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text
+        if (update.message.reply_to_message and update.message.reply_to_message.text)
+        else ""
+    )
+    if not text:
+        return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
+
+    # hyperlink guard
+    if contains_link(text, update):
+        return await update.message.reply_text("⚠️ Link detected. For safety, send this update manually to the channels.")
+
+    # delete matching album if 'sold out' present
+    phrase = _extract_phrase_before_sold_out(text)
+    deleted_in = []
+    if phrase:
+        for chat in target_chats:
+            try:
+                ok = await _delete_matching_album(ctx, chat, phrase)
+                if not ok:
+                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
+                if ok:
+                    deleted_in.append(str(chat))
+            except Exception as e:
+                logger.exception(f"Album delete attempt failed for {chat}: {e}")
+
+    # broadcast text to all targets
+    ok, fail = 0, 0
+    for chat in target_chats:
+        try:
+            await ctx.bot.send_message(chat_id=chat, text=text)
+            ok += 1
+        except Exception as e:
+            fail += 1
+            logger.exception(f"/post failed for {chat}: {e}")
+
+    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
+    return await update.message.reply_text(f"📣 Sent to {ok} targets" + (f", {fail} failed" if fail else "") + note)
+
+# ─── /postadj: adjusted text to all registered targets; same delete logic (links allowed) ───
+async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not target_chats:
+        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
+
+    base = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text
+        if (update.message.reply_to_message and update.message.reply_to_message.text)
+        else ""
+    )
+    if not base:
+        return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
+
+    phrase = _extract_phrase_before_sold_out(base)
+    deleted_in = []
+    if phrase:
+        for chat in target_chats:
+            try:
+                ok = await _delete_matching_album(ctx, chat, phrase)
+                if not ok:
+                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
+                if ok:
+                    deleted_in.append(str(chat))
+            except Exception as e:
+                logger.exception(f"Album delete attempt failed for {chat}: {e}")
+
+    ok, fail = 0, 0
+    for chat in target_chats:
+        try:
+            await ctx.bot.send_message(chat_id=chat, text=adjust_caption(base, chat))
+            ok += 1
+        except Exception as e:
+            fail += 1
+            logger.exception(f"/postadj failed for {chat}: {e}")
+
+    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
+    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else "") + note)
 
 # ─── Entrypoint ─────────────────────────────────────
 def main():
