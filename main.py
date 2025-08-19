@@ -4,7 +4,6 @@ import json
 import asyncio
 import threading
 import logging
-from telethon.tl.types import PeerChannel, PeerChat
 from dotenv import load_dotenv
 from flask import Flask
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -328,18 +327,13 @@ def _extract_phrase_before_sold_out(text: str) -> str:
 
 def _resolve_target(chat: str | int):
     """
-    Accepts -100... channel IDs, -... basic chat IDs, or @username/str.
-    Returns a value Telethon can resolve via get_entity(...).
+    Accepts -100... numeric IDs or @username/str.
+    For numeric strings, return the integer (keep the -100 prefix intact).
     """
     s = str(chat)
     if s.lstrip("-").isdigit():
-        if s.startswith("-100"):      # channels/supergroups
-            return PeerChannel(int(s[4:]))
-        elif s.startswith("-"):       # basic groups (rare)
-            return PeerChat(int(s[1:]))
-        else:
-            return int(s)             # plain user ID (unlikely here)
-    return chat                        # @username or name
+        return int(s)
+    return chat  # @username
 
 async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
     """
@@ -619,7 +613,7 @@ async def diag_soldout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         arr.sort(key=lambda x: x.date)
         cap = _first_non_empty_caption(arr)
         if not cap: continue
-        mark = "MATCH" if _norm(cap).startswith(_norm(phrase)) else "no"
+        mark = "MATCH" if _norm(phrase) in _norm(cap) else "no"
         kind = "album" if key[0] != "single" else "single"
         lines.append(f"- {kind}: {_norm(cap)[:90]}{'...' if len(cap)>90 else ''} -> {mark}")
         shown += 1
