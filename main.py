@@ -406,6 +406,8 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
         key = (gid,) if gid else ("single", m.id)  # unique key for single-media
         groups.setdefault(key, []).append(m)
 
+    logger.info(f"[fallback] scanning {len(groups)} media groups/singles in chat={chat}")
+
     phrase_norm = (phrase or "").strip().lower()
     if not phrase_norm or not groups:
         return False
@@ -420,8 +422,14 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
         first_cap = _first_non_empty_caption(arr)
         if not first_cap:
             continue
-        if _norm(first_cap).startswith(_norm(phrase)):
-            # Delete all message ids in this group (or the single one)
+
+        cap_norm    = _norm(first_cap)
+        phrase_norm = _norm(phrase)
+
+        # DEBUG: show what we’re evaluating (trim to avoid log spam)
+        logger.info(f"[fallback] chat={chat} cap={cap_norm[:120]} … | phrase={phrase_norm}")
+
+        if phrase_norm and phrase_norm in cap_norm:
             mids = [x.id for x in arr]
             deleted_any = False
             for mid in mids:
@@ -430,6 +438,7 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
                     deleted_any = True
                 except Exception as e:
                     logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
+            logger.info(f"[fallback] deleted={deleted_any} mids={mids} in chat={chat}")
             return deleted_any
 
     return False
