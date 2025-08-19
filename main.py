@@ -35,22 +35,30 @@ target_chats = []
 inc_pound    = {}
 inc_cart     = {}
 text_targets = []
-album_index  = {} 
+album_index  = {}
 
 try:
     _config = json.load(open(CONFIG_FILE))
     target_chats = _config.get("target_chats", [])
-    inc_pound = _config.get("inc_pound", {})
-    inc_cart = _config.get("inc_cart", {})
+    inc_pound    = _config.get("inc_pound", {})
+    inc_cart     = _config.get("inc_cart", {})
     text_targets = _config.get("text_targets", [])
     album_index  = _config.get("album_index", {})
 except:
     _config = {}
 
+def _save_config():
+    _config["target_chats"] = target_chats
+    _config["inc_pound"]    = inc_pound
+    _config["inc_cart"]     = inc_cart
+    _config["text_targets"] = text_targets
+    _config["album_index"]  = album_index
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+
 # ─── Constants and regex ───────────────────────────
 THRESHOLD = 200
 _pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]\s*for|[Ee][Aa]))", re.IGNORECASE)
-_pattern_takefor = re.compile(r'(?i)(\btake\s*for\s*)(\$?)(\d+(?:\.\d+)?)\b')
 
 # ─── Flask keep-alive app ──────────────────────────
 webapp = Flask(__name__)
@@ -64,73 +72,182 @@ def keep_alive():
     thread.daemon = True
     thread.start()
 
+# ─── /settexttargets: store static text-only destinations ─────────
+async def settexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        return await update.message.reply_text("Usage: /settexttargets <target1,target2,...>\nExample: /settexttargets -100111,-100222,@third")
+
+    # parse comma-separated targets
+    proposed = [t.strip() for t in " ".join(ctx.args).split(",") if t.strip()]
+    # ensure they are registered first (so we don't store typos)
+    unknown = [t for t in proposed if t not in target_chats]
+    if unknown:
+        return await update.message.reply_text("❌ Unknown/Unregistered target(s): " + ", ".join(unknown) +
+                                              "\nUse /register <chat> first or /targets to view registered ones.")
+
+    global text_targets
+    text_targets = proposed
+    _config["text_targets"] = text_targets
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+    return await update.message.reply_text("✅ text_targets set:\n" + "\n".join(text_targets))
+
+# ─── /gettexttargets: show current list ────────────────────────────
+async def gettexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not text_targets:
+        return await update.message.reply_text("text_targets: (none set)")
+    return await update.message.reply_text("text_targets:\n" + "\n".join(text_targets))
+
+# ─── /cleartexttargets: clear list ─────────────────────────────────
+async def cleartexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global text_targets
+    text_targets = []
+    _config["text_targets"] = text_targets
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(_config, f, indent=2)
+    return await update.message.reply_text("✅ text_targets cleared.")
+
 # ─── Caption adjustment utility ────────────────────
 def adjust_caption(text: str, chat: str) -> str:
-    # $30/ea or 975/P for 20
-    def repl_slashprice(m):
+    def repl(m):
         prefix, orig = m.group(1), m.group(2)
         val = float(orig)
         inc = inc_pound.get(chat, THRESHOLD) if val > THRESHOLD else inc_cart.get(chat, 15)
         new_val = val + inc
-        new = f"{new_val:.{len(orig.split('.')[-1])}f}" if '.' in orig else str(int(new_val))
+        if '.' in orig:
+            dec_len = len(orig.split('.')[-1])
+            new = f"{new_val:.{dec_len}f}"
+        else:
+            new = str(int(new_val))
         return f"{prefix}{new}"
+    return _pattern.sub(repl, text)
 
-    # TAKE FOR 500  (case-insensitive, preserves spacing and optional $)
-    def repl_takefor(m):
-        lead, prefix, orig = m.group(1), m.group(2), m.group(3)
-        val = float(orig)
-        inc = inc_pound.get(chat, THRESHOLD) if val > THRESHOLD else inc_cart.get(chat, 15)
-        new_val = val + inc
-        new = f"{new_val:.{len(orig.split('.')[-1])}f}" if '.' in orig else str(int(new_val))
-        return f"{lead}{prefix}{new}"
+def _add_album_record(chat: str, caption: str, message_ids: list[int]):
+    cid = str(chat)
+    album_index.setdefault(cid, [])
+    album_index[cid].append({"caption": caption or "", "message_ids": message_ids})
+    _save_config()
 
-    out = _pattern.sub(repl_slashprice, text)
-    out = _pattern_takefor.sub(repl_takefor, out)
-    return out
+def _extract_phrase_before_sold_out(text: str) -> str:
+    i = text.lower().find("sold out")
+    if i == -1:
+        return ""
+    return text[:i].strip()
 
-import unicodedata, string
-_WS = re.compile(r"\s+")
-def _norm(s: str) -> str:
-    """Normalize for safe prefix/contains checks."""
-    if not s: return ""
-    s = unicodedata.normalize("NFKC", s).lower()
-    s = _WS.sub(" ", s).strip()
-    return s
+async def settexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        return await update.message.reply_text("Usage: /settexttargets <t1,t2,...>")
+    proposed = [t.strip() for t in " ".join(ctx.args).split(",") if t.strip()]
+    unknown = [t for t in proposed if t not in target_chats]
+    if unknown:
+        return await update.message.reply_text("❌ Unknown target(s): " + ", ".join(unknown) +
+                                              "\nUse /register <chat> first or /targets to view.")
+    global text_targets
+    text_targets = proposed
+    _save_config()
+    return await update.message.reply_text("✅ text_targets set:\n" + "\n".join(text_targets))
 
-def _first_non_empty_caption(msgs):
-    """Return the first non-empty caption/message string within a media group."""
-    for x in msgs:
-        cap = (x.message or x.caption or "").strip()
-        if cap:
-            return cap
-    return ""
+async def gettexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    return await update.message.reply_text("text_targets:\n" + ("\n".join(text_targets) if text_targets else "(none)"))
 
-# Detect plain URLs, t.me links, and Markdown-style [text](url)
-URL_PATTERN = re.compile(
-    r'(?ix)'
-    r'(?:\b(?:https?://|www\.)\S+)'            # http(s) or www.
-    r'|(?:\bt\.me/\S+|\btelegram\.me/\S+)'     # Telegram shortlinks
-    r'|\[[^\]]+\]\((?:https?://|www\.)[^)]+\)' # markdown link
-)
+async def cleartexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global text_targets
+    text_targets = []
+    _save_config()
+    return await update.message.reply_text("✅ text_targets cleared.")
 
-def contains_link(update_text: str, update_obj: Update) -> bool:
-    if update_text and URL_PATTERN.search(update_text):
-        return True
-    # also honor Telegram’s entity parsing just in case
-    ent = getattr(getattr(update_obj, "message", None), "entities", None) or []
-    return any(e.type in ("url", "text_link") for e in ent)
+async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
+    """
+    Use our local index to find the most-recent album whose caption starts with `phrase`.
+    Delete all messages in that album via the bot and remove from index.
+    """
+    cid = str(chat)
+    if cid not in album_index or not album_index[cid]:
+        return False
 
-def _chatid(x):
-    """Return int for numeric ids (e.g., '-100…'), else untouched (e.g., '@publicchannel')."""
-    s = str(x).strip()
-    return int(s) if s.lstrip("-").isdigit() else s
+    phrase_norm = phrase.lower().strip()
+    for idx in range(len(album_index[cid]) - 1, -1, -1):
+        rec = album_index[cid][idx]
+        cap = (rec.get("caption") or "").strip()
+        if cap.lower().startswith(phrase_norm) and rec.get("message_ids"):
+            deleted_any = False
+            for mid in rec["message_ids"]:
+                try:
+                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                    deleted_any = True
+                except Exception as e:
+                    logger.exception(f"Index delete failed for {chat} mid={mid}: {e}")
+            album_index[cid].pop(idx)
+            _save_config()
+            return deleted_any
+    return False
+
+HISTORY_SCAN_LIMIT = 800  # recent messages per target to search in fallback
+
+async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
+    """
+    If index didn’t find an album, scan target channel history (Telethon user client)
+    for the most-recent album whose first caption starts with `phrase` (case-insensitive).
+    """
+    # Ensure Telethon user client is ready
+    try:
+        if not history_client.is_connected():
+            await history_client.connect()
+        if not await history_client.is_user_authorized():
+            logger.warning("Telethon history_client not authorized; cannot fallback search.")
+            return False
+    except Exception as e:
+        logger.exception(f"Telethon connect/authorize failed: {e}")
+        return False
+
+    # Resolve entity
+    try:
+        tgt = await history_client.get_entity(int(chat)) if str(chat).lstrip("-").isdigit() \
+              else await history_client.get_entity(chat)
+    except Exception as e:
+        logger.exception(f"Cannot resolve target entity {chat}: {e}")
+        return False
+
+    # Collect recent media albums
+    groups = {}  # grouped_id -> [Message,...]
+    async for m in history_client.iter_messages(tgt, limit=HISTORY_SCAN_LIMIT):
+        if not (m.photo or m.video or m.document):
+            continue
+        gid = m.grouped_id or None
+        if gid is None:
+            continue  # not an album
+        groups.setdefault(gid, []).append(m)
+
+    phrase_norm = (phrase or "").strip().lower()
+    if not phrase_norm or not groups:
+        return False
+
+    # Newest groups first; caption check on first item
+    for gid, arr in sorted(groups.items(), key=lambda kv: max(x.date for x in kv[1]), reverse=True):
+        arr.sort(key=lambda x: x.date)
+        first_cap = (arr[0].message or arr[0].caption or "") if arr else ""
+        if (first_cap or "").strip().lower().startswith(phrase_norm):
+            deleted_any = False
+            for mid in [x.id for x in arr]:
+                try:
+                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                    deleted_any = True
+                except Exception as e:
+                    logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
+            return deleted_any
+    return False
+
+# ─── /targets: show currently registered forwarding targets ────────
+async def targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not target_chats:
+        return await update.message.reply_text("Targets: (none)")
+    await update.message.reply_text("Targets:\n" + "\n".join(map(str, target_chats)))
 
 # ─── /register handler ─────────────────────────────
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         return await update.message.reply_text("Usage: /register <chat_id_or_username>")
-    raw = ctx.args[0]
-    chat = _chatid(raw)
+    chat = ctx.args[0]
     if chat not in target_chats:
         target_chats.append(chat)
         inc_pound[chat] = THRESHOLD
@@ -176,18 +293,89 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
+# ─── /post: EXACT text to text_targets; if "sold out", delete matching album first ───
+async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not text_targets:
+        return await update.message.reply_text(
+            "No text_targets set. Use /settexttargets <t1,t2,...> first.\n"
+            "Tip: /targets shows registered destinations."
+        )
+
+    text = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text if (update.message.reply_to_message and update.message.reply_to_message.text) else ""
+    )
+    if not text:
+        return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
+
+    # Deletion phase (if "sold out" present)
+    phrase = _extract_phrase_before_sold_out(text)
+    deleted_in = []
+    if phrase:
+        for chat in text_targets:
+            try:
+                ok = await _delete_matching_album(ctx, chat, phrase)
+                if not ok:
+                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
+                if ok:
+                    deleted_in.append(str(chat))
+            except Exception as e:
+                logger.exception(f"Album delete attempt failed for {chat}: {e}")
+
+    # Posting phase
+    ok, fail = 0, 0
+    for chat in text_targets:
+        try:
+            await ctx.bot.send_message(chat_id=chat, text=text)
+            ok += 1
+        except Exception as e:
+            fail += 1
+            logger.exception(f"/post failed for {chat}: {e}")
+
+    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
+    return await update.message.reply_text(f"📣 Sent to {ok} text_targets" + (f", {fail} failed" if fail else "") + note)
+
+# ─── /postadj: adjusted text to text_targets; same delete logic ───
+async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not text_targets:
+        return await update.message.reply_text("No text_targets set. Use /settexttargets <t1,t2,...> first.")
+
+    base = " ".join(ctx.args).strip() if ctx.args else (
+        update.message.reply_to_message.text if (update.message.reply_to_message and update.message.reply_to_message.text) else ""
+    )
+    if not base:
+        return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
+
+    phrase = _extract_phrase_before_sold_out(base)
+    deleted_in = []
+    if phrase:
+        for chat in text_targets:
+            try:
+                ok = await _delete_matching_album(ctx, chat, phrase)
+                if not ok:
+                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
+                if ok:
+                    deleted_in.append(str(chat))
+            except Exception as e:
+                logger.exception(f"Album delete attempt failed for {chat}: {e}")
+
+    ok, fail = 0, 0
+    for chat in text_targets:
+        try:
+            await ctx.bot.send_message(chat_id=chat, text=adjust_caption(base, chat))
+            ok += 1
+        except Exception as e:
+            fail += 1
+            logger.exception(f"/postadj failed for {chat}: {e}")
+
+    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
+    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} text_targets" + (f", {fail} failed" if fail else "") + note)
+
 # ─── Initialize persistent Telethon user client for history ────
 # Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
 SESSION_STRING = os.getenv("SESSION_STRING")
 if not SESSION_STRING:
     raise RuntimeError("SESSION_STRING not set in .env. Please generate a Telethon string session.")
 history_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-
-# ─── /targets: show currently registered forwarding targets ────────
-async def targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("Targets: (none)")
-    await update.message.reply_text("Targets:\n" + "\n".join(map(str, target_chats)))
 
 # ─── /forward handler (history) ─────────────────────────────────
 import tempfile
@@ -201,7 +389,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Validate arguments
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
-    chat = _chatid(ctx.args[0])
+    chat = ctx.args[0]
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
 
@@ -219,7 +407,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Fetch source channel entity
     try:
-        src = await _get_entity_resolving_channels(SOURCE_CHAT)
+        src = await history_client.get_entity(int(SOURCE_CHAT))
     except Exception as e:
         return await notify.edit_text(f"❌ Cannot access source channel: {e}")
 
@@ -257,7 +445,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 else:
                     media.append(InputMediaDocument(open(path, 'rb'), caption=cap))
             try:
-                sent = await ctx.bot.send_media_group(chat_id=_chatid(chat), media=media)
+                sent = await ctx.bot.send_media_group(chat_id=chat, media=media)
                 count += len(sent)
                 msg_ids = [m.message_id for m in sent]
                 _add_album_record(chat, new_cap or "", msg_ids)
@@ -267,11 +455,11 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # Single media message: native forward
             m = group[0]
             try:
-                sent = await ctx.bot.copy_message(chat_id=_chatid(chat), from_chat_id=SOURCE_CHAT, message_id=m.id)
+                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=m.id)
                 orig_cap = m.caption or m.message or ''
                 new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
                 if new_cap and new_cap != orig_cap:
-                    await ctx.bot.edit_message_caption(chat_id=_chatid(sent.chat_id), message_id=sent.message_id, caption=new_cap)
+                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
                 count += 1
             except Exception:
                 pass
@@ -288,8 +476,8 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
     # Done
-    # remove the whole repeated chain at the end and just do:
     await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
+    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
 # buffer for live media-groups
 media_buf = {}
@@ -313,190 +501,11 @@ async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
                     media.append(InputMediaVideo(m.video.file_id, caption=cap))
                 else:
                     media.append(InputMediaDocument(m.document.file_id, caption=cap))
-            sent = await ctx.bot.send_media_group(chat_id=_chatid(chat), media=media)
+            sent = await ctx.bot.send_media_group(chat_id=chat, media=media)
             msg_ids = [m.message_id for m in sent]
             _add_album_record(chat, new_cap or "", msg_ids)
         except:
             continue
-
-def _save_config():
-    _config["target_chats"] = target_chats
-    _config["inc_pound"]    = inc_pound
-    _config["inc_cart"]     = inc_cart
-    _config["text_targets"] = text_targets
-    _config["album_index"]  = album_index
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(_config, f, indent=2)
-
-def _add_album_record(chat: str, caption: str, message_ids: list[int]):
-    cid = str(chat)
-    album_index.setdefault(cid, [])
-    album_index[cid].append({"caption": caption or "", "message_ids": message_ids})
-    _save_config()
-
-def _extract_phrase_before_sold_out(text: str) -> str:
-    i = text.lower().find("sold out")
-    if i == -1:
-        return ""
-    return text[:i].strip()
-
-async def _get_entity_resolving_channels(chat: str | int):
-    """
-    Resolve a target for Telethon. Works for:
-    - BotAPI-style numeric ids (e.g., -1001234567890)
-    - @usernames / strings
-    It first tries fast resolution; if the id is -100..., it searches dialogs for the
-    positive channel id (Telethon's entity.id) before falling back.
-    """
-    s = str(chat).strip()
-
-    # Username or plain string → let Telethon resolve directly
-    if not s.lstrip("-").isdigit():
-        return await history_client.get_entity(s)
-
-    # Numeric
-    # If it's a channel/supergroup in Bot API form (-100xxxxxxxxxx),
-    # derive the positive Telethon entity id and try to find it in dialogs.
-    if s.startswith("-100") and s[4:].isdigit():
-        abs_id = int(s[4:])  # Telethon entity.id
-        try:
-            # try fast path: if cached, Telethon can resolve by positive id
-            return await history_client.get_entity(abs_id)
-        except Exception:
-            pass
-
-        # scan dialogs to find a matching entity.id
-        try:
-            async for d in history_client.iter_dialogs(limit=2000):
-                ent = getattr(d, "entity", None)
-                if ent is not None and getattr(ent, "id", None) == abs_id:
-                    return ent
-        except Exception:
-            pass
-
-        # last resort: try the original string or positive id again
-        try:
-            return await history_client.get_entity(s)
-        except Exception:
-            try:
-                return await history_client.get_entity(abs_id)
-            except Exception as e:
-                raise e
-
-    # Other numeric ids (groups/users)
-    return await history_client.get_entity(int(s))
-
-def _resolve_target(chat: str | int):
-    """
-    Accepts -100... numeric IDs or @username/str.
-    For numeric strings, return the integer (keep the -100 prefix intact).
-    """
-    s = str(chat)
-    if s.lstrip("-").isdigit():
-        return int(s)
-    return chat  # @username
-
-async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
-    """
-    Find the most recent album in album_index[chat] whose caption STARTS with `phrase`
-    (case-insensitive), delete all its messages, and remove it from the index.
-    Returns True if something was deleted.
-    """
-    cid = str(chat)
-    if cid not in album_index or not album_index[cid]:
-        return False
-
-    phrase_norm = phrase.lower().strip()
-    # search from newest to oldest
-    for idx in range(len(album_index[cid]) - 1, -1, -1):
-        rec = album_index[cid][idx]
-        cap = (rec.get("caption") or "").strip()
-        if _norm(cap).startswith(_norm(phrase)) and rec.get("message_ids"):
-            # try to delete every message in the album
-            deleted_any = False
-            for mid in rec["message_ids"]:
-                try:
-                    await ctx.bot.delete_message(chat_id=_chatid(chat), message_id=mid)
-                    deleted_any = True
-                except Exception as e:
-                    logger.exception(f"Failed to delete message {mid} in {chat}: {e}")
-            # remove from index and persist
-            album_index[cid].pop(idx)
-            _save_config()
-            return deleted_any
-    return False
-
-HISTORY_SCAN_LIMIT = 800  # a little deeper, adjust if needed
-
-async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
-    """
-    Search the target channel history for the most-recent media post whose visible caption
-    (first non-empty caption within its media-group, or the single item caption) starts
-    with `phrase` (case-insensitive). Deletes the whole album (or the single message).
-    """
-    # Ensure Telethon user client is connected & authorized
-    try:
-        if not history_client.is_connected():
-            await history_client.connect()
-        if not await history_client.is_user_authorized():
-            logger.warning("Telethon history_client not authorized; cannot fallback search.")
-            return False
-    except Exception as e:
-        logger.exception(f"Telethon connect/authorize failed: {e}")
-        return False
-
-    # Resolve target entity
-    try:
-       tgt = await _get_entity_resolving_channels(chat)
-    except Exception as e:
-        logger.exception(f"Cannot access target entity {chat}: {e}")
-        return False
-
-    # Group recent media by grouped_id; treat single media (no grouped_id) as its own "group"
-    groups: dict[tuple, list] = {}
-    async for m in history_client.iter_messages(tgt, limit=HISTORY_SCAN_LIMIT):
-        if not (m.photo or m.video or m.document):
-            continue
-        gid = m.grouped_id
-        key = (gid,) if gid else ("single", m.id)  # unique key for single-media
-        groups.setdefault(key, []).append(m)
-
-    logger.info(f"[fallback] scanning {len(groups)} media groups/singles in chat={chat}")
-
-    phrase_norm = (phrase or "").strip().lower()
-    if not phrase_norm or not groups:
-        return False
-
-    # Sort groups by newest first (max date in that group)
-    def grp_date(kv):  # kv: (key, [msgs])
-        return max(x.date for x in kv[1])
-    for key, arr in sorted(groups.items(), key=grp_date, reverse=True):
-        arr.sort(key=lambda x: x.date)  # chronological inside group
-
-        # Pick the first NON-EMPTY caption across the group (many users caption the 2nd+ item)
-        first_cap = _first_non_empty_caption(arr)
-        if not first_cap:
-            continue
-
-        cap_norm    = _norm(first_cap)
-        phrase_norm = _norm(phrase)
-
-        # DEBUG: show what we’re evaluating (trim to avoid log spam)
-        logger.info(f"[fallback] chat={chat} cap={cap_norm[:120]} … | phrase={phrase_norm}")
-
-        if phrase_norm and phrase_norm in cap_norm:
-            mids = [x.id for x in arr]
-            deleted_any = False
-            for mid in mids:
-                try:
-                    await ctx.bot.delete_message(chat_id=_chatid(chat), message_id=mid)
-                    deleted_any = True
-                except Exception as e:
-                    logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
-            logger.info(f"[fallback] deleted={deleted_any} mids={mids} in chat={chat}")
-            return deleted_any
-
-    return False
 
 # ─── Live forward handler ───────────────────────────
 async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -524,7 +533,7 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 new_cap = adjust_caption(orig_caption, chat) if orig_caption else None
                 # Copy with overridden caption if applicable
                 await ctx.bot.copy_message(
-                    chat_id=_chatid(chat),
+                    chat_id=chat,
                     from_chat_id=msg.chat.id,
                     message_id=msg.message_id,
                     caption=new_cap
@@ -540,134 +549,25 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for chat in target_chats:
                 new_txt = adjust_caption(msg.text, chat)
                 try:
-                    await ctx.bot.send_message(chat_id=_chatid(chat), text=new_txt)
+                    await ctx.bot.send_message(chat_id=chat, text=new_txt)
                 except Exception:
                     continue
         return
 
-# ─── /post: EXACT text to all registered targets; block hyperlinks; delete-on-sold-out ───
-async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
-
-    # text from args or from a replied message
-    text = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text
-        if (update.message.reply_to_message and update.message.reply_to_message.text)
-        else ""
-    )
-    if not text:
-        return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
-
-    # hyperlink guard
-    if contains_link(text, update):
-        return await update.message.reply_text("⚠️ Link detected. For safety, send this update manually to the channels.")
-
-    # delete matching album if 'sold out' present
-    phrase = _extract_phrase_before_sold_out(text)
-    deleted_in = []
-    if phrase:
+    # Otherwise, skip text-only posts
+    if msg.photo or msg.video or msg.document:
+        orig = msg.caption or ""
         for chat in target_chats:
             try:
-                ok = await _delete_matching_album(ctx, chat, phrase)
-                if not ok:
-                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
-                if ok:
-                    deleted_in.append(str(chat))
-            except Exception as e:
-                logger.exception(f"Album delete attempt failed for {chat}: {e}")
+                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=msg.message_id)
+                new_cap = adjust_caption(orig, chat)
+                if new_cap != orig:
+                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
+            except:
+                continue
 
-    # broadcast text to all targets
-    ok, fail = 0, 0
-    for chat in target_chats:
-        try:
-            await ctx.bot.send_message(chat_id=_chatid(chat), text=text)
-            ok += 1
-        except Exception as e:
-            fail += 1
-            logger.exception(f"/post failed for {chat}: {e}")
 
-    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
-    return await update.message.reply_text(f"📣 Sent to {ok} targets" + (f", {fail} failed" if fail else "") + note)
 
-# ─── /postadj: adjusted text to all registered targets; same delete logic (links allowed) ───
-async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not target_chats:
-        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
-
-    base = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text
-        if (update.message.reply_to_message and update.message.reply_to_message.text)
-        else ""
-    )
-    if not base:
-        return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
-
-    phrase = _extract_phrase_before_sold_out(base)
-    deleted_in = []
-    if phrase:
-        for chat in target_chats:
-            try:
-                ok = await _delete_matching_album(ctx, chat, phrase)
-                if not ok:
-                    ok = await _delete_matching_album_fallback(ctx, chat, phrase)
-                if ok:
-                    deleted_in.append(str(chat))
-            except Exception as e:
-                logger.exception(f"Album delete attempt failed for {chat}: {e}")
-
-    ok, fail = 0, 0
-    for chat in target_chats:
-        try:
-            await ctx.bot.send_message(chat_id=_chatid(chat), text=adjust_caption(base, chat))
-            ok += 1
-        except Exception as e:
-            fail += 1
-            logger.exception(f"/postadj failed for {chat}: {e}")
-
-    note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
-    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else "") + note)
-
-async def diag_soldout(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if len(ctx.args) < 2:
-        return await update.message.reply_text("Usage: /diag_soldout <chat_id_or_username> <phrase...>")
-    chat = ctx.args[0]
-    phrase = " ".join(ctx.args[1:])
-
-    try:
-        if not history_client.is_connected():
-            await history_client.connect()
-        if not await history_client.is_user_authorized():
-            return await update.message.reply_text("Telethon user is not authorized.")
-    except Exception as e:
-        return await update.message.reply_text(f"Telethon connect error: {e}")
-
-    try:
-        tgt = await history_client.get_entity(_resolve_target(chat))
-    except Exception as e:
-        return await update.message.reply_text(f"Cannot access target: {e}")
-
-    groups = {}
-    async for m in history_client.iter_messages(tgt, limit=200):
-        if not (m.photo or m.video or m.document):
-            continue
-        gid = m.grouped_id
-        key = (gid,) if gid else ("single", m.id)
-        groups.setdefault(key, []).append(m)
-
-    lines = [f"Diag phrase: {phrase}"]
-    shown = 0
-    for key, arr in sorted(groups.items(), key=lambda kv: max(x.date for x in kv[1]), reverse=True):
-        arr.sort(key=lambda x: x.date)
-        cap = _first_non_empty_caption(arr)
-        if not cap: continue
-        mark = "MATCH" if _norm(phrase) in _norm(cap) else "no"
-        kind = "album" if key[0] != "single" else "single"
-        lines.append(f"- {kind}: {_norm(cap)[:90]}{'...' if len(cap)>90 else ''} -> {mark}")
-        shown += 1
-        if shown >= 12: break
-
-    await update.message.reply_text("\n".join(lines) if shown else "No recent media found.")
 
 # ─── Entrypoint ─────────────────────────────────────
 def main():
@@ -677,11 +577,13 @@ def main():
     application.add_handler(CommandHandler("forward", forward_history))
     application.add_handler(CommandHandler("increasepound", increasepound))
     application.add_handler(CommandHandler("increasecart", increasecart))
+    application.add_handler(CommandHandler("targets", targets))        
     application.add_handler(CommandHandler("post", post))
     application.add_handler(CommandHandler("postadj", postadj))
-    application.add_handler(CommandHandler("targets", targets))           
+    application.add_handler(CommandHandler("settexttargets", settexttargets))
+    application.add_handler(CommandHandler("gettexttargets", gettexttargets))
+    application.add_handler(CommandHandler("cleartexttargets", cleartexttargets))
     application.add_handler(MessageHandler(filters.ALL, forward_handler), group=1)
-    application.add_handler(CommandHandler("diag_soldout", diag_soldout))
     logger.info("Bot up and entering polling loop.")
     application.run_polling()
 
