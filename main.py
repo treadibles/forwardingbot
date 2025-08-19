@@ -338,13 +338,13 @@ async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phra
             return deleted_any
     return False
 
-HISTORY_SCAN_LIMIT = 400  # how many recent messages to search per target
+HISTORY_SCAN_LIMIT = 600  # a little deeper, adjust if needed
 
 async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phrase: str) -> bool:
     """
-    If we didn't find an album in our index for this chat/phrase, search the channel history
-    (recent messages) for the most-recent media-group (album) whose *first caption* starts
-    with `phrase` (case-insensitive). If found, delete the whole album and return True.
+    Search the target channel history for the most-recent media post whose visible caption
+    (first non-empty caption within its media-group, or the single item caption) starts
+    with `phrase` (case-insensitive). Deletes the whole album (or the single message).
     """
     # Ensure Telethon user client is connected & authorized
     try:
@@ -357,40 +357,54 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
         logger.exception(f"Telethon connect/authorize failed: {e}")
         return False
 
-    # Resolve target entity (accepts numeric ID or @username)
+    # Resolve target entity
     try:
         tgt = await history_client.get_entity(int(chat)) if str(chat).lstrip("-").isdigit() else await history_client.get_entity(chat)
     except Exception as e:
         logger.exception(f"Cannot access target entity {chat}: {e}")
         return False
 
-    # Collect recent media messages and group by grouped_id (albums only)
-    groups = {}
+    # Group recent media by grouped_id; treat single media (no grouped_id) as its own "group"
+    groups: dict[tuple, list] = {}
     async for m in history_client.iter_messages(tgt, limit=HISTORY_SCAN_LIMIT):
         if not (m.photo or m.video or m.document):
             continue
         gid = m.grouped_id
-        if not gid:
-            continue  # skip single-media posts (you only want albums)
-        groups.setdefault(gid, []).append(m)
+        key = (gid,) if gid else ("single", m.id)  # unique key for single-media
+        groups.setdefault(key, []).append(m)
 
     phrase_norm = (phrase or "").strip().lower()
     if not phrase_norm or not groups:
         return False
 
-    # Search newest albums first; compare against the first message's caption
-    for gid, arr in sorted(groups.items(), key=lambda kv: max(x.date for x in kv[1]), reverse=True):
-        arr.sort(key=lambda x: x.date)  # chronological
-        first_cap = (arr[0].message or arr[0].caption or "")
-        if (first_cap or "").strip().lower().startswith(phrase_norm):
+    # Sort groups by newest first (max date in that group)
+    def grp_date(kv):  # kv: (key, [msgs])
+        return max(x.date for x in kv[1])
+    for key, arr in sorted(groups.items(), key=grp_date, reverse=True):
+        arr.sort(key=lambda x: x.date)  # chronological inside group
+
+        # Pick the first NON-EMPTY caption across the group (many users caption the 2nd+ item)
+        cap = ""
+        for x in arr:
+            cap = (x.message or x.caption or "").strip()
+            if cap:
+                break
+
+        if not cap:
+            continue
+
+        if cap.lower().startswith(phrase_norm):
+            # Delete all message ids in this group (or the single one)
+            mids = [x.id for x in arr]
             deleted_any = False
-            for mid in [x.id for x in arr]:
+            for mid in mids:
                 try:
                     await ctx.bot.delete_message(chat_id=chat, message_id=mid)
                     deleted_any = True
                 except Exception as e:
                     logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
             return deleted_any
+
     return False
 
 # ─── Live forward handler ───────────────────────────
@@ -452,7 +466,7 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
             except:
                 continue
-            
+
 # ─── /post: EXACT text to all registered targets; block hyperlinks; delete-on-sold-out ───
 async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not target_chats:
