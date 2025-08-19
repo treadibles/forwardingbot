@@ -63,41 +63,6 @@ def keep_alive():
     thread.daemon = True
     thread.start()
 
-# ─── /settexttargets: store static text-only destinations ─────────
-async def settexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args:
-        return await update.message.reply_text("Usage: /settexttargets <target1,target2,...>\nExample: /settexttargets -100111,-100222,@third")
-
-    # parse comma-separated targets
-    proposed = [t.strip() for t in " ".join(ctx.args).split(",") if t.strip()]
-    # ensure they are registered first (so we don't store typos)
-    unknown = [t for t in proposed if t not in target_chats]
-    if unknown:
-        return await update.message.reply_text("❌ Unknown/Unregistered target(s): " + ", ".join(unknown) +
-                                              "\nUse /register <chat> first or /targets to view registered ones.")
-
-    global text_targets
-    text_targets = proposed
-    _config["text_targets"] = text_targets
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(_config, f, indent=2)
-    return await update.message.reply_text("✅ text_targets set:\n" + "\n".join(text_targets))
-
-# ─── /gettexttargets: show current list ────────────────────────────
-async def gettexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not text_targets:
-        return await update.message.reply_text("text_targets: (none set)")
-    return await update.message.reply_text("text_targets:\n" + "\n".join(text_targets))
-
-# ─── /cleartexttargets: clear list ─────────────────────────────────
-async def cleartexttargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    global text_targets
-    text_targets = []
-    _config["text_targets"] = text_targets
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(_config, f, indent=2)
-    return await update.message.reply_text("✅ text_targets cleared.")
-
 # ─── Caption adjustment utility ────────────────────
 def adjust_caption(text: str, chat: str) -> str:
     def repl(m):
@@ -112,6 +77,21 @@ def adjust_caption(text: str, chat: str) -> str:
             new = str(int(new_val))
         return f"{prefix}{new}"
     return _pattern.sub(repl, text)
+
+# Detect plain URLs, t.me links, and Markdown-style [text](url)
+URL_PATTERN = re.compile(
+    r'(?ix)'
+    r'(?:\b(?:https?://|www\.)\S+)'            # http(s) or www.
+    r'|(?:\bt\.me/\S+|\btelegram\.me/\S+)'     # Telegram shortlinks
+    r'|\[[^\]]+\]\((?:https?://|www\.)[^)]+\)' # markdown link
+)
+
+def contains_link(update_text: str, update_obj: Update) -> bool:
+    if update_text and URL_PATTERN.search(update_text):
+        return True
+    # also honor Telegram’s entity parsing just in case
+    ent = getattr(getattr(update_obj, "message", None), "entities", None) or []
+    return any(e.type in ("url", "text_link") for e in ent)
 
 # ─── /register handler ─────────────────────────────
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -163,25 +143,29 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
 
-# ─── /post: EXACT text to text_targets; if "sold out", delete matching album first ───
+# ─── /post: EXACT text to all registered targets; block hyperlinks; delete-on-sold-out ───
 async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not text_targets:
-        return await update.message.reply_text(
-            "No text_targets set. Use /settexttargets <t1,t2,...> first.\n"
-            "Tip: /targets shows registered destinations."
-        )
+    if not target_chats:
+        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
 
+    # text from args or from a replied message
     text = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text if (update.message.reply_to_message and update.message.reply_to_message.text) else ""
+        update.message.reply_to_message.text
+        if (update.message.reply_to_message and update.message.reply_to_message.text)
+        else ""
     )
     if not text:
         return await update.message.reply_text("Usage: /post <text> (or reply to a text with /post)")
 
-    # Deletion phase (if "sold out" present)
+    # hyperlink guard
+    if contains_link(text, update):
+        return await update.message.reply_text("⚠️ Link detected. For safety, send this update manually to the channels.")
+
+    # delete matching album if 'sold out' present
     phrase = _extract_phrase_before_sold_out(text)
     deleted_in = []
     if phrase:
-        for chat in text_targets:
+        for chat in target_chats:
             try:
                 ok = await _delete_matching_album(ctx, chat, phrase)
                 if not ok:
@@ -191,9 +175,9 @@ async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.exception(f"Album delete attempt failed for {chat}: {e}")
 
-    # Posting phase
+    # broadcast text to all targets
     ok, fail = 0, 0
-    for chat in text_targets:
+    for chat in target_chats:
         try:
             await ctx.bot.send_message(chat_id=chat, text=text)
             ok += 1
@@ -202,15 +186,17 @@ async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"/post failed for {chat}: {e}")
 
     note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
-    return await update.message.reply_text(f"📣 Sent to {ok} text_targets" + (f", {fail} failed" if fail else "") + note)
+    return await update.message.reply_text(f"📣 Sent to {ok} targets" + (f", {fail} failed" if fail else "") + note)
 
-# ─── /postadj: adjusted text to text_targets; same delete logic ───
+# ─── /postadj: adjusted text to all registered targets; same delete logic (links allowed) ───
 async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not text_targets:
-        return await update.message.reply_text("No text_targets set. Use /settexttargets <t1,t2,...> first.")
+    if not target_chats:
+        return await update.message.reply_text("No targets registered. Use /register <chat> first.")
 
     base = " ".join(ctx.args).strip() if ctx.args else (
-        update.message.reply_to_message.text if (update.message.reply_to_message and update.message.reply_to_message.text) else ""
+        update.message.reply_to_message.text
+        if (update.message.reply_to_message and update.message.reply_to_message.text)
+        else ""
     )
     if not base:
         return await update.message.reply_text("Usage: /postadj <text> (or reply to a text with /postadj)")
@@ -218,7 +204,7 @@ async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     phrase = _extract_phrase_before_sold_out(base)
     deleted_in = []
     if phrase:
-        for chat in text_targets:
+        for chat in target_chats:
             try:
                 ok = await _delete_matching_album(ctx, chat, phrase)
                 if not ok:
@@ -229,7 +215,7 @@ async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 logger.exception(f"Album delete attempt failed for {chat}: {e}")
 
     ok, fail = 0, 0
-    for chat in text_targets:
+    for chat in target_chats:
         try:
             await ctx.bot.send_message(chat_id=chat, text=adjust_caption(base, chat))
             ok += 1
@@ -238,7 +224,7 @@ async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"/postadj failed for {chat}: {e}")
 
     note = f"\n🗑 Deleted album in: {', '.join(deleted_in)}" if deleted_in else ""
-    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} text_targets" + (f", {fail} failed" if fail else "") + note)
+    return await update.message.reply_text(f"📣 Sent (adjusted) to {ok} targets" + (f", {fail} failed" if fail else "") + note)
 
 # ─── Initialize persistent Telethon user client for history ────
 # Requires a pre-generated string session in the .env (e.g. via Telethon’s session.export())
@@ -252,7 +238,7 @@ async def targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not target_chats:
         return await update.message.reply_text("Targets: (none)")
     await update.message.reply_text("Targets:\n" + "\n".join(map(str, target_chats)))
-    
+
 # ─── /forward handler (history) ─────────────────────────────────
 import tempfile
 from telethon.utils import get_extension
@@ -505,9 +491,6 @@ def main():
     application.add_handler(CommandHandler("post", post))
     application.add_handler(CommandHandler("postadj", postadj))
     application.add_handler(CommandHandler("targets", targets))           
-    application.add_handler(CommandHandler("settexttargets", settexttargets))
-    application.add_handler(CommandHandler("gettexttargets", gettexttargets))
-    application.add_handler(CommandHandler("cleartexttargets", cleartexttargets))
     application.add_handler(MessageHandler(filters.ALL, forward_handler), group=1)
     logger.info("Bot up and entering polling loop.")
     application.run_polling()
