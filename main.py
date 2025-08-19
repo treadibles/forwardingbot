@@ -59,6 +59,8 @@ def _save_config():
 # ─── Constants and regex ───────────────────────────
 THRESHOLD = 200
 _pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]\s*for|[Ee][Aa]))", re.IGNORECASE)
+# matches: "TAKE FOR 500", "take for 500", "Take   for   500", optional "$"
+_pattern_takefor = re.compile(r'(?i)(\btake\s*for\s*)(\$?)(\d+(?:\.\d+)?)\b')
 
 # ─── Flask keep-alive app ──────────────────────────
 webapp = Flask(__name__)
@@ -89,7 +91,8 @@ def contains_link(update_text: str, update_obj: Update) -> bool:
 
 # ─── Caption adjustment utility ────────────────────
 def adjust_caption(text: str, chat: str) -> str:
-    def repl(m):
+    # Adjust things like "$30/ea" or "975/P for 20"
+    def repl_slashprice(m):
         prefix, orig = m.group(1), m.group(2)
         val = float(orig)
         inc = inc_pound.get(chat, THRESHOLD) if val > THRESHOLD else inc_cart.get(chat, 15)
@@ -100,7 +103,25 @@ def adjust_caption(text: str, chat: str) -> str:
         else:
             new = str(int(new_val))
         return f"{prefix}{new}"
-    return _pattern.sub(repl, text)
+
+    # Adjust things like "TAKE FOR 500" (case-insensitive)
+    def repl_takefor(m):
+        lead, prefix, orig = m.group(1), m.group(2), m.group(3)
+        val = float(orig)
+        inc = inc_pound.get(chat, THRESHOLD) if val > THRESHOLD else inc_cart.get(chat, 15)
+        new_val = val + inc
+        if '.' in orig:
+            dec_len = len(orig.split('.')[-1])
+            new = f"{new_val:.{dec_len}f}"
+        else:
+            new = str(int(new_val))
+        # keep original "take for" casing/spaces (lead) and any "$" (prefix)
+        return f"{lead}{prefix}{new}"
+
+    # Run both substitutions
+    out = _pattern.sub(repl_slashprice, text)
+    out = _pattern_takefor.sub(repl_takefor, out)
+    return out
 
 def _add_album_record(chat: str, caption: str, message_ids: list[int]):
     cid = str(chat)
