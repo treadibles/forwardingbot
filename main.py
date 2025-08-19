@@ -66,18 +66,27 @@ def keep_alive():
 
 # ─── Caption adjustment utility ────────────────────
 def adjust_caption(text: str, chat: str) -> str:
-    def repl(m):
+    # $30/ea or 975/P for 20
+    def repl_slashprice(m):
         prefix, orig = m.group(1), m.group(2)
         val = float(orig)
         inc = inc_pound.get(chat, THRESHOLD) if val > THRESHOLD else inc_cart.get(chat, 15)
         new_val = val + inc
-        if '.' in orig:
-            dec_len = len(orig.split('.')[-1])
-            new = f"{new_val:.{dec_len}f}"
-        else:
-            new = str(int(new_val))
+        new = f"{new_val:.{len(orig.split('.')[-1])}f}" if '.' in orig else str(int(new_val))
         return f"{prefix}{new}"
-    return _pattern.sub(repl, text)
+
+    # TAKE FOR 500  (case-insensitive, preserves spacing and optional $)
+    def repl_takefor(m):
+        lead, prefix, orig = m.group(1), m.group(2), m.group(3)
+        val = float(orig)
+        inc = inc_pound.get(chat, THRESHOLD) if val > THRESHOLD else inc_cart.get(chat, 15)
+        new_val = val + inc
+        new = f"{new_val:.{len(orig.split('.')[-1])}f}" if '.' in orig else str(int(new_val))
+        return f"{lead}{prefix}{new}"
+
+    out = _pattern.sub(repl_slashprice, text)
+    out = _pattern_takefor.sub(repl_takefor, out)
+    return out
 
 import unicodedata, string
 _WS = re.compile(r"\s+")
@@ -111,11 +120,17 @@ def contains_link(update_text: str, update_obj: Update) -> bool:
     ent = getattr(getattr(update_obj, "message", None), "entities", None) or []
     return any(e.type in ("url", "text_link") for e in ent)
 
+def _chatid(x):
+    """Return int for numeric ids (e.g., '-100…'), else untouched (e.g., '@publicchannel')."""
+    s = str(x).strip()
+    return int(s) if s.lstrip("-").isdigit() else s
+
 # ─── /register handler ─────────────────────────────
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         return await update.message.reply_text("Usage: /register <chat_id_or_username>")
-    chat = ctx.args[0]
+    raw = ctx.args[0]
+    chat = _chatid(raw)
     if chat not in target_chats:
         target_chats.append(chat)
         inc_pound[chat] = THRESHOLD
@@ -186,7 +201,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Validate arguments
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
-    chat = ctx.args[0]
+    chat = _chatid(ctx.args[0])
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
 
@@ -204,7 +219,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Fetch source channel entity
     try:
-        src = await history_client.get_entity(int(SOURCE_CHAT))
+        src = await _get_entity_resolving_channels(SOURCE_CHAT)
     except Exception as e:
         return await notify.edit_text(f"❌ Cannot access source channel: {e}")
 
@@ -242,7 +257,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 else:
                     media.append(InputMediaDocument(open(path, 'rb'), caption=cap))
             try:
-                sent = await ctx.bot.send_media_group(chat_id=chat, media=media)
+                sent = await ctx.bot.send_media_group(chat_id=_chatid(chat), media=media)
                 count += len(sent)
                 msg_ids = [m.message_id for m in sent]
                 _add_album_record(chat, new_cap or "", msg_ids)
@@ -252,11 +267,11 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # Single media message: native forward
             m = group[0]
             try:
-                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=m.id)
+                sent = await ctx.bot.copy_message(chat_id=_chatid(chat), from_chat_id=SOURCE_CHAT, message_id=m.id)
                 orig_cap = m.caption or m.message or ''
                 new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
                 if new_cap and new_cap != orig_cap:
-                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
+                    await ctx.bot.edit_message_caption(chat_id=_chatid(sent.chat_id), message_id=sent.message_id, caption=new_cap)
                 count += 1
             except Exception:
                 pass
@@ -273,8 +288,8 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
     # Done
+    # remove the whole repeated chain at the end and just do:
     await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
-    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
 
 # buffer for live media-groups
 media_buf = {}
@@ -298,7 +313,7 @@ async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
                     media.append(InputMediaVideo(m.video.file_id, caption=cap))
                 else:
                     media.append(InputMediaDocument(m.document.file_id, caption=cap))
-            sent = await ctx.bot.send_media_group(chat_id=chat, media=media)
+            sent = await ctx.bot.send_media_group(chat_id=_chatid(chat), media=media)
             msg_ids = [m.message_id for m in sent]
             _add_album_record(chat, new_cap or "", msg_ids)
         except:
@@ -324,6 +339,52 @@ def _extract_phrase_before_sold_out(text: str) -> str:
     if i == -1:
         return ""
     return text[:i].strip()
+
+async def _get_entity_resolving_channels(chat: str | int):
+    """
+    Resolve a target for Telethon. Works for:
+    - BotAPI-style numeric ids (e.g., -1001234567890)
+    - @usernames / strings
+    It first tries fast resolution; if the id is -100..., it searches dialogs for the
+    positive channel id (Telethon's entity.id) before falling back.
+    """
+    s = str(chat).strip()
+
+    # Username or plain string → let Telethon resolve directly
+    if not s.lstrip("-").isdigit():
+        return await history_client.get_entity(s)
+
+    # Numeric
+    # If it's a channel/supergroup in Bot API form (-100xxxxxxxxxx),
+    # derive the positive Telethon entity id and try to find it in dialogs.
+    if s.startswith("-100") and s[4:].isdigit():
+        abs_id = int(s[4:])  # Telethon entity.id
+        try:
+            # try fast path: if cached, Telethon can resolve by positive id
+            return await history_client.get_entity(abs_id)
+        except Exception:
+            pass
+
+        # scan dialogs to find a matching entity.id
+        try:
+            async for d in history_client.iter_dialogs(limit=2000):
+                ent = getattr(d, "entity", None)
+                if ent is not None and getattr(ent, "id", None) == abs_id:
+                    return ent
+        except Exception:
+            pass
+
+        # last resort: try the original string or positive id again
+        try:
+            return await history_client.get_entity(s)
+        except Exception:
+            try:
+                return await history_client.get_entity(abs_id)
+            except Exception as e:
+                raise e
+
+    # Other numeric ids (groups/users)
+    return await history_client.get_entity(int(s))
 
 def _resolve_target(chat: str | int):
     """
@@ -355,7 +416,7 @@ async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phra
             deleted_any = False
             for mid in rec["message_ids"]:
                 try:
-                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                    await ctx.bot.delete_message(chat_id=_chatid(chat), message_id=mid)
                     deleted_any = True
                 except Exception as e:
                     logger.exception(f"Failed to delete message {mid} in {chat}: {e}")
@@ -386,7 +447,7 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
 
     # Resolve target entity
     try:
-       tgt = await history_client.get_entity(_resolve_target(chat))
+       tgt = await _get_entity_resolving_channels(chat)
     except Exception as e:
         logger.exception(f"Cannot access target entity {chat}: {e}")
         return False
@@ -428,7 +489,7 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
             deleted_any = False
             for mid in mids:
                 try:
-                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                    await ctx.bot.delete_message(chat_id=_chatid(chat), message_id=mid)
                     deleted_any = True
                 except Exception as e:
                     logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
@@ -463,7 +524,7 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 new_cap = adjust_caption(orig_caption, chat) if orig_caption else None
                 # Copy with overridden caption if applicable
                 await ctx.bot.copy_message(
-                    chat_id=chat,
+                    chat_id=_chatid(chat),
                     from_chat_id=msg.chat.id,
                     message_id=msg.message_id,
                     caption=new_cap
@@ -479,23 +540,10 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for chat in target_chats:
                 new_txt = adjust_caption(msg.text, chat)
                 try:
-                    await ctx.bot.send_message(chat_id=chat, text=new_txt)
+                    await ctx.bot.send_message(chat_id=_chatid(chat), text=new_txt)
                 except Exception:
                     continue
         return
-
-    # Otherwise, skip text-only posts
-    return
-    if msg.photo or msg.video or msg.document:
-        orig = msg.caption or ""
-        for chat in target_chats:
-            try:
-                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=msg.message_id)
-                new_cap = adjust_caption(orig, chat)
-                if new_cap != orig:
-                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
-            except:
-                continue
 
 # ─── /post: EXACT text to all registered targets; block hyperlinks; delete-on-sold-out ───
 async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -533,7 +581,7 @@ async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ok, fail = 0, 0
     for chat in target_chats:
         try:
-            await ctx.bot.send_message(chat_id=chat, text=text)
+            await ctx.bot.send_message(chat_id=_chatid(chat), text=text)
             ok += 1
         except Exception as e:
             fail += 1
@@ -571,7 +619,7 @@ async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ok, fail = 0, 0
     for chat in target_chats:
         try:
-            await ctx.bot.send_message(chat_id=chat, text=adjust_caption(base, chat))
+            await ctx.bot.send_message(chat_id=_chatid(chat), text=adjust_caption(base, chat))
             ok += 1
         except Exception as e:
             fail += 1
