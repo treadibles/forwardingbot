@@ -216,6 +216,45 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
             return deleted_any
     return False
 
+# ─── Robust resolver for channels (handles -100... ids) ───────────────────────────
+async def _get_entity_resolving_channels(chat: str | int):
+    """
+    Resolve a target or source for Telethon.
+    Works for:
+      - BotAPI-style ids like -1001234567890
+      - @usernames
+    Requires that the Telethon user account is a member for private channels.
+    """
+    s = str(chat).strip()
+
+    # Username or link -> resolve directly
+    if not s.lstrip("-").isdigit():
+        return await history_client.get_entity(s)
+
+    # Numeric ids
+    if s.startswith("-100") and s[4:].isdigit():
+        abs_id = int(s[4:])  # Telethon's internal positive id
+        try:
+            return await history_client.get_entity(abs_id)
+        except Exception:
+            pass
+        # try dialogs
+        try:
+            async for d in history_client.iter_dialogs(limit=2000):
+                ent = getattr(d, "entity", None)
+                if ent is not None and getattr(ent, "id", None) == abs_id:
+                    return ent
+        except Exception:
+            pass
+        # last resort
+        try:
+            return await history_client.get_entity(s)
+        except Exception:
+            return await history_client.get_entity(abs_id)
+
+    # other numeric ids (basic groups/users)
+    return await history_client.get_entity(int(s))
+
 # ─── /targets: show currently registered forwarding targets ────────
 async def targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not target_chats:
@@ -390,11 +429,11 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         return await notify.edit_text(f"❌ History session error: {e}")
 
-    # Fetch source channel entity
+    # Fetch source channel entity (robust resolver)
     try:
-        src = await history_client.get_entity(int(SOURCE_CHAT))
-    except Exception as e:
-        return await notify.edit_text(f"❌ Cannot access source channel: {e}")
+        src = await _get_entity_resolving_channels(SOURCE_CHAT)
+    except Exception:
+        return await notify.edit_text("❌ Cannot access source channel: Telethon user cannot resolve it.")
 
     # Gather all media messages
     media_msgs = []
