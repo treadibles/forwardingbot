@@ -15,8 +15,7 @@ from telegram.ext import (
     ContextTypes,
 )
 from telethon import TelegramClient
-from telethon.sessions import StringSession, MemorySession
-from telethon.errors import FloodWaitError
+from telethon.sessions import StringSession
 
 # ─── Logging setup ──────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -62,6 +61,31 @@ _pattern = re.compile(r"(\$?)(\d+(?:\.\d+)?)(?=/\s*(?:[Pp]\s*for|[Ee][Aa]))", re
 # matches: "TAKE FOR 500", "take for 500", "Take   for   500", optional "$"
 _pattern_takefor = re.compile(r'(?i)(\btake\s*for\s*)(\$?)(\d+(?:\.\d+)?)\b')
 
+import unicodedata
+_WS = re.compile(r"\s+")
+
+def _chatid(x):
+    """int for numeric ids (e.g. '-100…'), else untouched (e.g. '@publicname')."""
+    s = str(x).strip()
+    return int(s) if s.lstrip("-").isdigit() else s
+
+def _norm(s: str) -> str:
+    """Normalize for robust matching: NFKC, lowercase, collapse spaces."""
+    if not s:
+        return ""
+    s = unicodedata.normalize("NFKC", s).lower()
+    return _WS.sub(" ", s).strip()
+
+def _first_non_empty_caption(msgs):
+    """Albums often store the caption on a later item; pick the first non-empty."""
+    for m in msgs:
+        cap = (getattr(m, "message", None) or getattr(m, "caption", None) or "").strip()
+        if cap:
+            return cap
+    return ""
+
+SOURCE_CHAT_ID = _chatid(SOURCE_CHAT)
+
 # ─── Flask keep-alive app ──────────────────────────
 webapp = Flask(__name__)
 @webapp.route("/")
@@ -76,10 +100,10 @@ def keep_alive():
 
     # Detect plain URLs, t.me links, and Markdown-style [text](url)
 URL_PATTERN = re.compile(
-    r'(?ix)'
-    r'(?:\b(?:https?://|www\.)\S+)'            # http(s) or www.
-    r'|(?:\bt\.me/\S+|\btelegram\.me/\S+)'     # Telegram shortlinks
-    r'|\[[^\]]+\]\((?:https?://|www\.)[^)]+\)' # markdown link
+r'(?ix)'
+r'(?:\b(?:https?://|www\.)\S+)'            # http(s) or www.
+r'|(?:\bt\.me/\S+|\btelegram\.me/\S+)'     # Telegram shortlinks
+r'|\[[^\]]+\]\((?:https?://|www\.)[^)]+\)' # markdown link
 )
 
 def contains_link(update_text: str, update_obj: Update) -> bool:
@@ -127,6 +151,9 @@ def _add_album_record(chat: str, caption: str, message_ids: list[int]):
     cid = str(chat)
     album_index.setdefault(cid, [])
     album_index[cid].append({"caption": caption or "", "message_ids": message_ids})
+    # keep only the last N records per channel (e.g., 500)
+    if len(album_index[cid]) > 500:
+        album_index[cid] = album_index[cid][-500:]
     _save_config()
 
 def _extract_phrase_before_sold_out(text: str) -> str:
@@ -148,16 +175,18 @@ async def _delete_matching_album(ctx: ContextTypes.DEFAULT_TYPE, chat: str, phra
     for idx in range(len(album_index[cid]) - 1, -1, -1):
         rec = album_index[cid][idx]
         cap = (rec.get("caption") or "").strip()
-        if cap.lower().startswith(phrase_norm) and rec.get("message_ids"):
+        if _norm(phrase) in _norm(cap) and rec.get("message_ids"):            
             deleted_any = False
             for mid in rec["message_ids"]:
                 try:
-                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                    await ctx.bot.delete_message(chat_id=_chatid(chat), message_id=mid)
                     deleted_any = True
                 except Exception as e:
                     logger.exception(f"Index delete failed for {chat} mid={mid}: {e}")
             album_index[cid].pop(idx)
             _save_config()
+            if deleted_any:
+                logger.info(f"Indexed delete OK in {chat}: {rec['message_ids']}")
             return deleted_any
     return False
 
@@ -181,8 +210,7 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
 
     # Resolve entity
     try:
-        tgt = await history_client.get_entity(int(chat)) if str(chat).lstrip("-").isdigit() \
-              else await history_client.get_entity(chat)
+        tgt = await _get_entity_resolving_channels(chat)
     except Exception as e:
         logger.exception(f"Cannot resolve target entity {chat}: {e}")
         return False
@@ -204,15 +232,17 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
     # Newest groups first; caption check on first item
     for gid, arr in sorted(groups.items(), key=lambda kv: max(x.date for x in kv[1]), reverse=True):
         arr.sort(key=lambda x: x.date)
-        first_cap = (arr[0].message or arr[0].caption or "") if arr else ""
-        if (first_cap or "").strip().lower().startswith(phrase_norm):
+        first_cap = _first_non_empty_caption(arr)
+        if _norm(phrase) in _norm(first_cap):
             deleted_any = False
             for mid in [x.id for x in arr]:
                 try:
-                    await ctx.bot.delete_message(chat_id=chat, message_id=mid)
+                    await ctx.bot.delete_message(chat_id=_chatid(chat), message_id=mid)
                     deleted_any = True
                 except Exception as e:
                     logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
+            if deleted_any:
+                logger.info(f"Fallback delete OK in {chat}: {[x.id for x in arr]}")
             return deleted_any
     return False
 
@@ -265,7 +295,7 @@ async def targets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         return await update.message.reply_text("Usage: /register <chat_id_or_username>")
-    chat = ctx.args[0]
+    chat = _chatid(ctx.args[0])
     if chat not in target_chats:
         target_chats.append(chat)
         inc_pound[chat] = THRESHOLD
@@ -347,7 +377,7 @@ async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ok, fail = 0, 0
     for chat in target_chats:
         try:
-            await ctx.bot.send_message(chat_id=chat, text=text)
+            await ctx.bot.send_message(chat_id=_chatid(chat), text=text)
             ok += 1
         except Exception as e:
             fail += 1
@@ -385,7 +415,7 @@ async def postadj(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ok, fail = 0, 0
     for chat in target_chats:
         try:
-            await ctx.bot.send_message(chat_id=chat, text=adjust_caption(base, chat))
+            await ctx.bot.send_message(chat_id=_chatid(chat), text=adjust_caption(base, chat))
             ok += 1
         except Exception as e:
             fail += 1
@@ -403,7 +433,6 @@ history_client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 # ─── /forward handler (history) ─────────────────────────────────
 import tempfile
-from telethon.utils import get_extension
 
 async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
@@ -413,7 +442,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Validate arguments
     if len(ctx.args) != 1:
         return await update.message.reply_text("Usage: /forward <chat_id_or_username>")
-    chat = ctx.args[0]
+    chat = _chatid(ctx.args[0])
     if chat not in target_chats:
         return await update.message.reply_text("Channel not registered. Use /register first.")
 
@@ -453,7 +482,7 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         group.sort(key=lambda m: m.date)
         if len(group) > 1 and group[0].grouped_id:
             # Album: download all items and send as a media_group
-            orig_cap = group[0].message or ''
+            orig_cap = _first_non_empty_caption(group) or ''
             new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
             media = []
             for idx, m in enumerate(group):
@@ -469,40 +498,38 @@ async def forward_history(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 else:
                     media.append(InputMediaDocument(open(path, 'rb'), caption=cap))
             try:
-                sent = await ctx.bot.send_media_group(chat_id=chat, media=media)
+                sent = await ctx.bot.send_media_group(chat_id=_chatid(chat), media=media)
                 count += len(sent)
                 msg_ids = [m.message_id for m in sent]
                 _add_album_record(chat, new_cap or "", msg_ids)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception(f"/forward_history album send failed for {chat}: {e}")
+
         else:
             # Single media message: native forward
             m = group[0]
             try:
-                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=m.id)
+                sent = await ctx.bot.copy_message(chat_id=_chatid(chat), from_chat_id=SOURCE_CHAT_ID, message_id=m.id)
                 orig_cap = m.caption or m.message or ''
                 new_cap = adjust_caption(orig_cap, chat) if orig_cap else None
                 if new_cap and new_cap != orig_cap:
-                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
+                    await ctx.bot.edit_message_caption(chat_id=_chatid(sent.chat_id), message_id=sent.message_id, caption=new_cap)
                 count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception(f"/forward_history single send failed for {chat}: {e}")
+
 
     # Cleanup temporary files
-    ... # existing cleanup code
-
-    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
     try:
         for f in os.listdir(temp_dir):
             os.remove(os.path.join(temp_dir, f))
         os.rmdir(temp_dir)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception(f"history temp cleanup failed: {e}")
 
-    # Done
+    # One final status message
     await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")
-    await notify.edit_text(f"✅ History forwarded: {count} media items to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")(f"✅ History forwarded: {count} messages to {chat}.")
-
+    
 # buffer for live media-groups
 media_buf = {}
 FLUSH_DELAY = 1.0
@@ -525,18 +552,24 @@ async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
                     media.append(InputMediaVideo(m.video.file_id, caption=cap))
                 else:
                     media.append(InputMediaDocument(m.document.file_id, caption=cap))
-            sent = await ctx.bot.send_media_group(chat_id=chat, media=media)
+            sent = await ctx.bot.send_media_group(chat_id=_chatid(chat), media=media)
             msg_ids = [m.message_id for m in sent]
             _add_album_record(chat, new_cap or "", msg_ids)
-        except:
+        except Exception as e:
+            logger.exception(f"flush_media_group failed for {chat}: {e}")
             continue
 
 # ─── Live forward handler ───────────────────────────
 async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message
     # Only handle messages from the source channel
-    if str(update.effective_chat.id) != SOURCE_CHAT or not target_chats:
-        return
+    if isinstance(SOURCE_CHAT_ID, int):
+        if update.effective_chat.id != SOURCE_CHAT_ID or not target_chats:
+            return
+    else:
+        # SOURCE_CHAT_ID is like '@name'
+        if (not update.effective_chat.username) or update.effective_chat.username.lower() != str(SOURCE_CHAT_ID).lstrip('@').lower() or not target_chats:
+            return
 
     # Handle media groups
     if msg.media_group_id:
@@ -557,13 +590,15 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 new_cap = adjust_caption(orig_caption, chat) if orig_caption else None
                 # Copy with overridden caption if applicable
                 await ctx.bot.copy_message(
-                    chat_id=chat,
+                    chat_id=_chatid(chat),
                     from_chat_id=msg.chat.id,
                     message_id=msg.message_id,
                     caption=new_cap
                 )
-            except Exception:
+            except Exception as e:
+                logger.exception(f"forward_handler copy_message failed for {chat}: {e}")
                 continue
+
         return
 
     # Handle text-only pricing posts (cart or pound) (cart or pound)
@@ -573,24 +608,11 @@ async def forward_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for chat in target_chats:
                 new_txt = adjust_caption(msg.text, chat)
                 try:
-                    await ctx.bot.send_message(chat_id=chat, text=new_txt)
-                except Exception:
+                    await ctx.bot.send_message(chat_id=_chatid(chat), text=new_txt)
+                except Exception as e:
+                    logger.exception(f"forward_handler send_message failed for {chat}: {e}")
                     continue
         return
-
-    # Otherwise, skip text-only posts
-    if msg.photo or msg.video or msg.document:
-        orig = msg.caption or ""
-        for chat in target_chats:
-            try:
-                sent = await ctx.bot.copy_message(chat_id=chat, from_chat_id=SOURCE_CHAT, message_id=msg.message_id)
-                new_cap = adjust_caption(orig, chat)
-                if new_cap != orig:
-                    await ctx.bot.edit_message_caption(chat_id=sent.chat_id, message_id=sent.message_id, caption=new_cap)
-            except:
-                continue
-
-
 
 
 # ─── Entrypoint ─────────────────────────────────────
