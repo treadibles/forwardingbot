@@ -541,7 +541,7 @@ async def flush_media_group(gid: str, ctx: ContextTypes.DEFAULT_TYPE):
     if not msgs:
         return
     msgs.sort(key=lambda m: m.message_id)
-    orig = msgs[0].caption or ""
+    orig = _first_non_empty_caption(msgs)
     for chat in target_chats:
         try:
             new_cap = adjust_caption(orig, chat)
