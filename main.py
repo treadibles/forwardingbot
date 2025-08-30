@@ -4,6 +4,7 @@ import json
 import asyncio
 import threading
 import logging
+import string
 from dotenv import load_dotenv
 from flask import Flask
 from telegram import Update, InputMediaPhoto, InputMediaVideo, InputMediaDocument
@@ -70,11 +71,12 @@ def _chatid(x):
     return int(s) if s.lstrip("-").isdigit() else s
 
 def _norm(s: str) -> str:
-    """Normalize for robust matching: NFKC, lowercase, collapse spaces."""
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", s).lower()
-    return _WS.sub(" ", s).strip()
+    s = _WS.sub(" ", s).strip()
+    # strip common trailing punctuation like . , ! ? :
+    return s.strip(string.punctuation + " ")
 
 def _first_non_empty_caption(msgs):
     """Albums often store the caption on a later item; pick the first non-empty."""
