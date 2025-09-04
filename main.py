@@ -86,6 +86,19 @@ def _first_non_empty_caption(msgs):
             return cap
     return ""
 
+def _hard_reason(exc: Exception) -> str:
+    """Return a short reason string for hard/perm errors from Bot API."""
+    s = str(exc).lower()
+    if "bot was kicked" in s:
+        return "bot_kicked"
+    if "chat_restricted" in s or "not enough rights" in s or "can't be deleted" in s:
+        return "bot_no_delete"
+    if "chat not found" in s or "channel_private" in s:
+        return "bot_invisible"
+    if "forbidden" in s and "send" in s:
+        return "bot_forbidden_send"
+    return ""
+
 SOURCE_CHAT_ID = _chatid(SOURCE_CHAT)
 
 # ─── Flask keep-alive app ──────────────────────────
@@ -236,15 +249,30 @@ async def _delete_matching_album_fallback(ctx: ContextTypes.DEFAULT_TYPE, chat: 
         arr.sort(key=lambda x: x.date)
         first_cap = _first_non_empty_caption(arr)
         if _norm(phrase) in _norm(first_cap):
+            mids = [x.id for x in arr]
             deleted_any = False
-            for mid in [x.id for x in arr]:
+            bot_failed = []
+
+            # 1) Try Bot API first (fast path)
+            for mid in mids:
                 try:
                     await ctx.bot.delete_message(chat_id=_chatid(chat), message_id=mid)
                     deleted_any = True
                 except Exception as e:
-                    logger.exception(f"Fallback delete failed for {chat} mid={mid}: {e}")
-            if deleted_any:
-                logger.info(f"Fallback delete OK in {chat}: {[x.id for x in arr]}")
+                    # Keep Bot API error for visibility; collect for Telethon fallback
+                    logger.exception(f"Bot delete failed for {chat} mid={mid}: {e}")
+                    bot_failed.append(mid)
+
+            # 2) If Bot API refused, try Telethon (user account) in one shot
+            if bot_failed:
+                try:
+                    tgt = await _get_entity_resolving_channels(chat)  # already resolved above; reuse if you kept it
+                    await history_client.delete_messages(tgt, bot_failed, revoke=True)
+                    deleted_any = True
+                    logger.info(f"Telethon delete OK in {chat}: {bot_failed}")
+                except Exception as e:
+                    logger.exception(f"Telethon delete failed in {chat} mids={bot_failed}: {e}")
+
             return deleted_any
     return False
 
@@ -342,6 +370,103 @@ async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with open(CONFIG_FILE, "w") as f:
         json.dump(_config, f, indent=2)
     await update.message.reply_text(f"✅ Cart increment for {chat} set to +{amt}")
+
+from datetime import datetime
+
+async def prunetargets(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    Scan all registered targets and prune ones that are clearly unusable:
+      - Bot kicked / restricted / no delete rights (hard errors)
+      - Telethon user cannot resolve (not a member / private)
+    Usage:
+      /prunetargets          -> dry run (reports only)
+      /prunetargets apply    -> actually remove bad targets and save config
+    """
+    apply = (len(ctx.args) >= 1 and ctx.args[0].lower() == "apply")
+    removed = []
+    report = []
+    keep = []
+
+    # Ensure Telethon is ready for visibility checks
+    tele_ok = True
+    try:
+        if not history_client.is_connected():
+            await history_client.connect()
+        if not await history_client.is_user_authorized():
+            tele_ok = False
+    except Exception as e:
+        tele_ok = False
+        logger.exception(f"Telethon connect error in prunetargets: {e}")
+
+    # We’ll check bot perms by trying to fetch the bot's member record
+    # (Does not send any messages)
+    bot_id = None
+    try:
+        me = await ctx.bot.get_me()
+        bot_id = me.id
+    except Exception as e:
+        logger.exception(f"get_me failed: {e}")
+
+    # Work on a copy so we can safely mutate lists/dicts if apply=True
+    for chat in list(target_chats):
+        reason = []
+        # 1) Bot-side checks (admin/delete ability / presence)
+        try:
+            if bot_id is not None:
+                cm = await ctx.bot.get_chat_member(_chatid(chat), bot_id)
+                status = getattr(cm, "status", None)
+                # PTB v20+: ChatMemberAdministrator(.privileges.can_delete_messages)
+                can_del = getattr(getattr(cm, "privileges", None), "can_delete_messages", None)
+                # PTB v13 style fallback:
+                if can_del is None:
+                    can_del = getattr(cm, "can_delete_messages", None)
+                if status not in ("administrator", "creator"):
+                    reason.append(f"bot_status={status}")
+                elif not bool(can_del):
+                    reason.append("bot_no_delete")
+        except Exception as e:
+            hr = _hard_reason(e) or f"bot_error={type(e).__name__}"
+            reason.append(hr)
+
+        # 2) Telethon visibility (only if Telethon is authorized)
+        if tele_ok:
+            try:
+                ent = await _get_entity_resolving_channels(chat)
+                # Quick visibility probe (cheap): try to iterate 1 message
+                got_one = False
+                async for _m in history_client.iter_messages(ent, limit=1):
+                    got_one = True
+                    break
+                if not got_one:
+                    reason.append("telethon_no_history")
+            except Exception as e:
+                reason.append("telethon_invisible")
+
+        # Decide keep/prune:
+        if any(r in ("bot_kicked", "bot_invisible") for r in reason) \
+           or ("bot_no_delete" in reason and "telethon_invisible" in reason):
+            # definitely unusable
+            if apply:
+                # remove from target_chats
+                target_chats[:] = [c for c in target_chats if c != chat]
+                # drop per-chat configs if present
+                inc_pound.pop(chat, None)
+                inc_cart.pop(chat, None)
+                album_index.pop(str(chat), None)
+                _save_config()
+                removed.append(f"{chat}  [{', '.join(reason)}]")
+            else:
+                removed.append(f"{chat}  [{', '.join(reason)}]")
+        else:
+            keep.append(f"{chat}  [{', '.join(reason) if reason else 'ok'}]")
+
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    header = f"🧹 Prune report @ {ts}\nMode: {'APPLY' if apply else 'DRY-RUN'}"
+    lines = [header, "", "Will remove:" if not apply else "Removed:"]
+    lines += (removed or ["(none)"])
+    lines += ["", "Kept:"]
+    lines += (keep or ["(none)"])
+    return await update.message.reply_text("\n".join(lines))
 
 # ─── /post: EXACT text to all registered targets; block hyperlinks; delete-on-sold-out ───
 async def post(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -626,6 +751,7 @@ def main():
     application.add_handler(CommandHandler("increasepound", increasepound))
     application.add_handler(CommandHandler("increasecart", increasecart))
     application.add_handler(CommandHandler("targets", targets))        
+    application.add_handler(CommandHandler("prunetargets", prunetargets))
     application.add_handler(CommandHandler("post", post))
     application.add_handler(CommandHandler("postadj", postadj))
     application.add_handler(MessageHandler(filters.ALL, forward_handler), group=1)
