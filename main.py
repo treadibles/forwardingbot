@@ -341,9 +341,12 @@ async def register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def increasepound(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(ctx.args) != 2:
         return await update.message.reply_text("Usage: /increasepound <chat> <amount>")
-    chat, val = ctx.args
+    raw_chat, val = ctx.args
+    chat = _chatid(raw_chat)  # ← normalize
     if chat not in target_chats:
-        return await update.message.reply_text("Channel not registered.")
+        return await update.message.reply_text(
+            "Channel not registered. Use the exact id/username shown in /targets."
+        )
     try:
         amt = float(val)
     except ValueError:
@@ -358,9 +361,12 @@ async def increasepound(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def increasecart(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(ctx.args) != 2:
         return await update.message.reply_text("Usage: /increasecart <chat> <amount>")
-    chat, val = ctx.args
+    raw_chat, val = ctx.args
+    chat = _chatid(raw_chat)  # ← normalize
     if chat not in target_chats:
-        return await update.message.reply_text("Channel not registered.")
+        return await update.message.reply_text(
+            "Channel not registered. Use the exact id/username shown in /targets."
+        )
     try:
         amt = float(val)
     except ValueError:
